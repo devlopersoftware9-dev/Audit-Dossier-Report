@@ -54,30 +54,23 @@ or run `python import_excel.py "Audit Dossier Web.xlsx" --replace` from the comm
 | `core.py` | Database, today's tasks, marking, auto-FALSE, reports, fines |
 | `schedule.py` | Due-date rules (a copy of the old column B formula) |
 | `import_excel.py` | Import from the old sheet |
-| `data/audit.db` | **The database**. Back up this file regularly. |
+| `db.py` | Database connection (SQLite on the PC, PostgreSQL online) |
+| `render.yaml` | Render deployment settings |
+| `data/audit.db` | **The local database**. Back up this file regularly. |
 | `tests/test_app.py` | Full test: `AUDIT_XLSX=sheet.xlsx python tests/test_app.py` |
 
-## Live on the internet (PythonAnywhere, free)
+## Live on the internet (free: Render + Neon, both with "Sign in with GitHub")
 
-Free hosting that keeps the database file between restarts:
+The website runs on **Render**. The data is kept in a free **Neon** PostgreSQL database, so it stays safe through restarts.
+On the office PC (`run.bat`) the same code uses the local SQLite file instead.
 
-1. Create a free account at https://www.pythonanywhere.com. Your link will be `https://<username>.pythonanywhere.com`.
-2. Open **Consoles → Bash** and run:
-   ```bash
-   git clone -b audit-portal-system https://github.com/devlopersoftware9-dev/audit-dossier-report.git
-   cd audit-dossier-report && pip3.10 install --user -r requirements.txt
-   ```
-3. Go to **Web → Add a new web app → Manual configuration → Python 3.10**.
-   - *Source code*: `/home/<username>/audit-dossier-report`
-   - *WSGI configuration file*: replace everything with
-     ```python
-     import sys; sys.path.insert(0, '/home/<username>/audit-dossier-report')
-     from wsgi import application
-     ```
-   - *Static files*: URL `/static/` → `/home/<username>/audit-dossier-report/static`
-   - Click **Reload**.
-4. Open the link and log in as `admin / admin123`. The portal asks you to set a new password straight away.
-5. Go to **Settings → Import**, upload the sheet (.xlsx), then set salaries and passwords under **Users**.
+1. **Neon** (database): go to https://neon.tech → *Sign in with GitHub* → create a project (region: Singapore).
+   Copy the **connection string** (`postgresql://...neon.tech/neondb?sslmode=require...`).
+2. **Render** (website): go to https://render.com → *Sign in with GitHub* → **New + → Blueprint** →
+   select this repository. `render.yaml` sets everything up. When it asks, paste the Neon string into **DATABASE_URL**.
+3. After the deploy finishes, open the link (`https://audit-dossier-xxxx.onrender.com`). Log in as `admin / admin123`.
+   You are asked to set a new password straight away.
+4. Go to **Settings → Import**, upload the Google Sheet (.xlsx), then set passwords and salaries under **Users**.
 
-Updating later: in the Bash console run `cd audit-dossier-report && git pull`, then press **Reload** on the Web tab.
-On the free plan, click "Run until 3 months from today" on the Web tab once every 3 months.
+On the free plan the site sleeps after 15 minutes without visitors. The first page after that takes about 30–50 seconds to open.
+To update the site, push to the `audit-portal-system` branch and Render deploys it again automatically.

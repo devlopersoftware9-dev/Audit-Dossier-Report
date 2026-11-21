@@ -9,9 +9,18 @@ from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
 os.environ['AUDIT_DB'] = os.path.join(tempfile.mkdtemp(), 'test.db')
 os.environ['AUDIT_FAKE_NOW'] = '2026-11-21T10:00:00'
 XLSX = os.environ.get('AUDIT_XLSX')
+if os.environ.get('TEST_PG_DSN'):            # run the same suite on PostgreSQL
+    os.environ['DATABASE_URL'] = os.environ['TEST_PG_DSN']
+    import db  # noqa: E402
+    import psql_driver  # noqa: E402
+    db.PG_DRIVER = psql_driver
+    import subprocess  # noqa: E402
+    subprocess.run(['psql', os.environ['TEST_PG_DSN'], '-qc', 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'], check=True)
+    print('*** running on PostgreSQL ***')
 
 import openpyxl  # noqa: E402
 

@@ -4,68 +4,13 @@ Each task (check list) belongs to ONE user. The user marks it TRUE / FALSE once 
 """
 import hashlib
 import os
-import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from schedule import BUCKET_ORDER, bucket, is_scheduled, norm
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get('AUDIT_DB', os.path.join(BASE_DIR, 'data', 'audit.db'))
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'Officer',          -- Admin / Officer
-  salary REAL NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT, last_login TEXT
-);
-CREATE TABLE IF NOT EXISTS tasks (               -- one row = one check-list point (like a Sort_List row)
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  depart TEXT NOT NULL,
-  checklist TEXT NOT NULL,
-  checklist_url TEXT DEFAULT '',
-  detail TEXT DEFAULT '',
-  task TEXT NOT NULL,
-  user TEXT NOT NULL COLLATE NOCASE,
-  audit_type TEXT DEFAULT '',
-  recurrence TEXT NOT NULL,
-  target TEXT NOT NULL,
-  target_month TEXT DEFAULT '',
-  company TEXT NOT NULL,
-  branch TEXT NOT NULL,
-  start_time TEXT DEFAULT '', end_time TEXT DEFAULT '',
-  sop_name TEXT DEFAULT '', sop_url TEXT DEFAULT '',
-  remarks TEXT DEFAULT '', ordered_by TEXT DEFAULT '',
-  hidden INTEGER NOT NULL DEFAULT 0,
-  sort_order INTEGER DEFAULT 0,
-  created_by TEXT, created_at TEXT, updated_by TEXT, updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS records (             -- date-wise TRUE / FALSE (like Officer_Master_DB)
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  rkey TEXT NOT NULL UNIQUE,                     -- date|user|branch|dept|checklist|task (lower case)
-  date TEXT NOT NULL,                            -- yyyy-mm-dd
-  user TEXT NOT NULL COLLATE NOCASE,
-  company TEXT, branch TEXT, department TEXT, checklist TEXT, todo TEXT, task_type TEXT,
-  status INTEGER NOT NULL,                       -- 1 TRUE / 0 FALSE
-  remarks TEXT DEFAULT '',
-  source TEXT DEFAULT 'Portal',                  -- Portal / Extra / Admin / Auto-Closed / Imported
-  timestamp TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_records_date ON records(date);
-CREATE INDEX IF NOT EXISTS ix_records_user ON records(user, date);
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, note TEXT);
-CREATE TABLE IF NOT EXISTS monthly_snapshots (
-  month TEXT, user TEXT, total INTEGER, done INTEGER, missed INTEGER, pct REAL, grade TEXT,
-  task_fine REAL, pct_fine REAL, total_fine REAL, salary REAL, generated_at TEXT,
-  PRIMARY KEY (month, user)
-);
-CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, user TEXT, action TEXT, detail TEXT);
-"""
+from db import DB_PATH, IS_PG, connect, schema  # noqa: F401  (re-exported)
 
 DEFAULT_SETTINGS = [
     ('APP_TITLE', 'Audit Dossier Portal', 'Portal title'),
@@ -82,33 +27,32 @@ DEFAULT_SETTINGS = [
 ]
 
 
-# ---------------------------------------------------------------- connection
-def connect():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA foreign_keys = ON')
-    con.execute('PRAGMA journal_mode = WAL')
-    return con
-
-
 def init_db(con):
-    con.executescript(SCHEMA)
+    con.executescript(schema())
     for k, v, n in DEFAULT_SETTINGS:
-        con.execute('INSERT OR IGNORE INTO settings(key, value, note) VALUES (?,?,?)', (k, v, n))
+        con.execute('INSERT INTO settings(key, value, note) VALUES (?,?,?) ON CONFLICT DO NOTHING', (k, v, n))
     if not con.execute("SELECT 1 FROM users WHERE role='Admin'").fetchone():
-        con.execute('INSERT OR IGNORE INTO users(username, password_hash, role, created_at) VALUES (?,?,?,?)',
+        con.execute('INSERT INTO users(username, password_hash, role, created_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING',
                     ('admin', generate_password_hash(os.environ.get('ADMIN_PASSWORD') or 'admin123'), 'Admin', now_text(con)))
     con.commit()
 
 
 # ---------------------------------------------------------------- settings / time
+_SETTINGS_CACHE = {'at': 0.0, 'val': None}
+
+
 def settings(con):
-    return {r['key']: r['value'] or '' for r in con.execute('SELECT key, value FROM settings')}
+    # cached for a few seconds: settings are read many times per page (time zone, fines ...)
+    import time
+    if _SETTINGS_CACHE['val'] is None or time.monotonic() - _SETTINGS_CACHE['at'] > 5:
+        _SETTINGS_CACHE['val'] = {r['key']: r['value'] or '' for r in con.execute('SELECT key, value FROM settings')}
+        _SETTINGS_CACHE['at'] = time.monotonic()
+    return dict(_SETTINGS_CACHE['val'])
 
 
 def set_setting(con, key, value):
-    con.execute('INSERT INTO settings(key, value, note) VALUES (?,?,"") ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+    _SETTINGS_CACHE['val'] = None
+    con.execute("INSERT INTO settings(key, value, note) VALUES (?,?,'') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, str(value)))
 
 
@@ -163,12 +107,12 @@ def slab_for(slabs, pct):
 
 
 def log(con, user, action, detail=''):
-    con.execute('INSERT INTO audit_log(ts, user, action, detail) VALUES (?,?,?,?)', (now_text(con), user, action, str(detail)[:2000]))
+    con.execute('INSERT INTO audit_log(ts, "user", action, detail) VALUES (?,?,?,?)', (now_text(con), user, action, str(detail)[:2000]))
 
 
 # ---------------------------------------------------------------- users
 def authenticate(con, username, password):
-    u = con.execute('SELECT * FROM users WHERE username=? AND active=1', (username.strip(),)).fetchone()
+    u = con.execute('SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND active=1', (username.strip(),)).fetchone()
     if u and check_password_hash(u['password_hash'], password):
         con.execute('UPDATE users SET last_login=? WHERE id=?', (now_text(con), u['id']))
         con.commit()
@@ -227,7 +171,7 @@ def record_key(d, user, branch, dept, checklist, task_type):
 
 
 def records_for_day(con, d):
-    return {r['rkey']: r for r in con.execute('SELECT * FROM records WHERE date=?', (str(d),))}
+    return {r['rkey']: r for r in con.execute('SELECT * FROM records WHERE "date"=?', (str(d),))}
 
 
 def attach_status(g, recs, d):
@@ -294,10 +238,10 @@ def mark(con, key, user, status, remarks, by_user, by_admin):
     source = 'Admin' if by_admin and norm(by_user) != norm(g['user']) else ('Portal' if due else 'Extra')
     rk = record_key(d, g['user'], g['branch'], g['depart'], g['checklist'], g['task'])
     ts = now_text(con)
-    con.execute("""INSERT INTO records(rkey, date, user, company, branch, department, checklist, todo, task_type,
-                       status, remarks, source, timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    con.execute("""INSERT INTO records(rkey, "date", "user", company, branch, department, checklist, todo, task_type,
+                       status, remarks, source, "timestamp") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(rkey) DO UPDATE SET status=excluded.status, remarks=excluded.remarks,
-                       source=excluded.source, timestamp=excluded.timestamp""",
+                       source=excluded.source, "timestamp"=excluded."timestamp\"""",
                 (rk, str(d), g['user'], g['company'], g['branch'], g['depart'], g['checklist'],
                  ', '.join(g['details']), g['task'], 1 if status else 0, (remarks or '')[:1000], source, ts))
     con.commit()
@@ -321,8 +265,9 @@ def close_day(con, d):
         rk = record_key(d, g['user'], g['branch'], g['depart'], g['checklist'], g['task'])
         if rk in recs:
             continue
-        con.execute("""INSERT OR IGNORE INTO records(rkey, date, user, company, branch, department, checklist, todo,
-                       task_type, status, remarks, source, timestamp) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+        con.execute("""INSERT INTO records(rkey, "date", "user", company, branch, department, checklist, todo,
+                       task_type, status, remarks, source, "timestamp") VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?)
+                       ON CONFLICT DO NOTHING""",
                     (rk, str(d), g['user'], g['company'], g['branch'], g['depart'], g['checklist'],
                      ', '.join(g['details']), g['task'], 'Not marked (auto-closed)', 'Auto-Closed', ts))
         recs[rk] = True
@@ -351,24 +296,24 @@ def auto_close(con):
 
 # ---------------------------------------------------------------- reports
 def _where(f, user_lock=None):
-    w, p = ['date BETWEEN ? AND ?'], [f['start'], f['end']]
+    w, p = ['"date" BETWEEN ? AND ?'], [f['start'], f['end']]
     user = user_lock or f.get('user')
     if user:
-        w.append('user = ? COLLATE NOCASE'); p.append(user)
+        w.append('LOWER("user") = LOWER(?)'); p.append(user)
     st = (f.get('status') or 'ALL').upper()
     if st in ('TRUE', 'FALSE'):
         w.append('status = ?'); p.append(1 if st == 'TRUE' else 0)
     for col, k in (('department', 'department'), ('branch', 'branch'), ('task_type', 'task_type'), ('source', 'source')):
         if f.get(k):
-            w.append(f'{col} = ? COLLATE NOCASE'); p.append(f[k])
+            w.append(f'LOWER({col}) = LOWER(?)'); p.append(f[k])
     if f.get('checklist'):
-        w.append('checklist LIKE ?'); p.append('%' + f['checklist'] + '%')
+        w.append('LOWER(checklist) LIKE LOWER(?)'); p.append('%' + f['checklist'] + '%')
     return ' AND '.join(w), p
 
 
 def detail_report(con, f, user_lock=None):
     w, p = _where(f, user_lock)
-    rows = [dict(r) for r in con.execute(f'SELECT * FROM records WHERE {w} ORDER BY date DESC, user, department, checklist', p)]
+    rows = [dict(r) for r in con.execute(f'SELECT * FROM records WHERE {w} ORDER BY "date" DESC, "user", department, checklist', p)]
     t = sum(r['status'] for r in rows)
     return dict(rows=rows, count=len(rows), true=t, false=len(rows) - t)
 
@@ -392,7 +337,7 @@ def _fine_ctx(con):
                 per=per, dept=dept, slabs=parse_slabs(s.get('FINE_PCT_SLABS')), grades=parse_slabs(s.get('GRADE_SLABS')))
 
 
-GROUP_COLS = {'user': 'user', 'department': 'department', 'checklist': "department || ' › ' || checklist",
+GROUP_COLS = {'user': '"user"', 'department': 'department', 'checklist': "department || ' › ' || checklist",
               'branch': 'branch', 'task_type': 'task_type', 'date': 'date'}
 
 
@@ -441,11 +386,11 @@ def monthly(con, ym, user=None):
         p = [start, end, u['key']]
         u['departments'] = [dict(r) for r in con.execute(
             "SELECT department, COUNT(*) total, SUM(status) done, COUNT(*)-SUM(status) missed, "
-            "ROUND(SUM(status)*100.0/COUNT(*),1) pct FROM records WHERE date BETWEEN ? AND ? AND user=? COLLATE NOCASE "
+            "ROUND(SUM(status)*100.0/COUNT(*),1) pct FROM records WHERE \"date\" BETWEEN ? AND ? AND LOWER(\"user\")=LOWER(?) "
             "AND COALESCE(source,'')<>'Extra' GROUP BY department ORDER BY pct", p)]
         u['missed_list'] = [dict(r) for r in con.execute(
-            "SELECT date, department, checklist, task_type, remarks FROM records WHERE date BETWEEN ? AND ? "
-            "AND user=? COLLATE NOCASE AND status=0 AND COALESCE(source,'')<>'Extra' ORDER BY date", p)]
+            'SELECT "date", department, checklist, task_type, remarks FROM records WHERE "date" BETWEEN ? AND ? '
+            "AND LOWER(\"user\")=LOWER(?) AND status=0 AND COALESCE(source,'')<>'Extra' ORDER BY \"date\"", p)]
         out.append(u)
     snap = con.execute('SELECT MAX(generated_at) g FROM monthly_snapshots WHERE month=?', (ym,)).fetchone()['g']
     return dict(month=ym, rows=out, mode=eff['mode'], saved_on=snap or '')
@@ -468,7 +413,7 @@ def auto_monthly(con):
     t = today(con)
     prev = (date(t.year, t.month, 1) - timedelta(days=1)).strftime('%Y-%m')
     if not con.execute('SELECT 1 FROM monthly_snapshots WHERE month=?', (prev,)).fetchone():
-        if con.execute('SELECT 1 FROM records WHERE substr(date,1,7)=?', (prev,)).fetchone():
+        if con.execute('SELECT 1 FROM records WHERE substr("date",1,7)=?', (prev,)).fetchone():
             save_monthly(con, prev)
 
 
@@ -510,16 +455,16 @@ def save_task(con, form, by, task_id=None):
     t = clean_task(form)
     ts = now_text(con)
     if task_id:
-        sets = ', '.join(f'{k}=?' for k in TASK_FIELDS)
+        sets = ', '.join(f'"{k}"=?' for k in TASK_FIELDS)
         con.execute(f'UPDATE tasks SET {sets}, hidden=?, updated_by=?, updated_at=? WHERE id=?',
                     [t[k] for k in TASK_FIELDS] + [t['hidden'], by, ts, task_id])
         log(con, by, 'EDIT_TASK', f'{task_id} {t["checklist"]}')
     else:
         order = con.execute('SELECT COALESCE(MAX(sort_order),0)+1 FROM tasks').fetchone()[0]
         cols = TASK_FIELDS + ['hidden', 'sort_order', 'created_by', 'created_at', 'updated_by', 'updated_at']
-        con.execute(f'INSERT INTO tasks({",".join(cols)}) VALUES ({",".join("?" * len(cols))})',
-                    [t[k] for k in TASK_FIELDS] + [t['hidden'], order, by, ts, by, ts])
-        task_id = con.execute('SELECT last_insert_rowid()').fetchone()[0]
+        task_id = con.execute(f'INSERT INTO tasks({",".join(chr(34) + c + chr(34) for c in cols)}) '
+                              f'VALUES ({",".join("?" * len(cols))}) RETURNING id',
+                              [t[k] for k in TASK_FIELDS] + [t['hidden'], order, by, ts, by, ts]).fetchone()[0]
         log(con, by, 'ADD_TASK', f'{task_id} {t["checklist"]}')
     con.commit()
     return task_id
@@ -527,7 +472,8 @@ def save_task(con, form, by, task_id=None):
 
 def listings(con):
     def col(c):
-        return [r[0] for r in con.execute(f"SELECT DISTINCT {c} FROM tasks WHERE COALESCE({c},'') <> '' ORDER BY {c}")]
+        q = f'"{c}"'
+        return [r[0] for r in con.execute(f"SELECT DISTINCT {q} FROM tasks WHERE COALESCE({q},'') <> '' ORDER BY {q}")]
     return dict(depart=col('depart'), checklist=col('checklist'), task=col('task'), audit_type=col('audit_type'),
                 company=col('company'), branch=col('branch'),
                 user=sorted(set(col('user')) | set(user_names(con)), key=str.lower),

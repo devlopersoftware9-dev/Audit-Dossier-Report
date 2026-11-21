@@ -53,7 +53,8 @@ def import_workbook(con, path, replace=False, by='import'):
 
     ws = wb['Sort_List']
     ts = core.now_text(con)
-    n_tasks, names = 0, {}
+    n_tasks, names, task_rows = 0, {}, []
+    cols = core.TASK_FIELDS + ['hidden', 'sort_order', 'created_by', 'created_at']
     branch_of = {}
     for r in range(7, ws.max_row + 1):
         c = lambda col: ws.cell(r, col)
@@ -71,20 +72,23 @@ def import_workbook(con, path, replace=False, by='import'):
                    target=_txt(c(13).value), target_month=_txt(c(14).value), company=_txt(c(15).value),
                    branch=_txt(c(16).value), start_time=_txt(c(17).value), end_time=_txt(c(18).value),
                    sop_name=sop_name, sop_url=sop_url, remarks=_txt(c(21).value), ordered_by=_txt(c(22).value))
-        cols = core.TASK_FIELDS + ['hidden', 'sort_order', 'created_by', 'created_at']
-        con.execute(f'INSERT INTO tasks({",".join(cols)}) VALUES ({",".join("?" * len(cols))})',
-                    [row[k] for k in core.TASK_FIELDS] + [hidden, r, by, ''])   # '' = existed before
+        task_rows.append([row[k] for k in core.TASK_FIELDS] + [hidden, r, by, ''])   # '' = existed before
         branch_of.setdefault((norm(row['depart']), norm(checklist), norm(row['task'])), row['branch'])
         n_tasks += 1
 
+    if task_rows:
+        con.executemany(f'INSERT INTO tasks({",".join(chr(34) + c + chr(34) for c in cols)}) '
+                        f'VALUES ({",".join("?" * len(cols))})', task_rows)
+
     n_users = 0
     for u in names.values():
-        if not con.execute('SELECT 1 FROM users WHERE username=?', (u,)).fetchone():
+        if not con.execute('SELECT 1 FROM users WHERE LOWER(username)=LOWER(?)', (u,)).fetchone():
             con.execute('INSERT INTO users(username, password_hash, role, created_at) VALUES (?,?,?,?)',
                         (u, generate_password_hash(DEFAULT_PASSWORD), 'Officer', ts))
             n_users += 1
 
-    n_recs, last = 0, None
+    n_recs, last, rec_rows = 0, None, []
+    before = con.execute('SELECT COUNT(*) FROM records').fetchone()[0]
     if 'Officer_Master_DB' in wb.sheetnames:
         ws = wb['Officer_Master_DB']
         for r in range(2, ws.max_row + 1):
@@ -103,12 +107,14 @@ def import_workbook(con, path, replace=False, by='import'):
             status = 1 if v[5] is True or norm(v[5]) == 'true' else 0
             stamp = v[6].strftime('%Y-%m-%d %H:%M:%S') if isinstance(v[6], datetime) else _txt(v[6])
             rk = core.record_key(d, user, branch, dept, cl, tt)
-            cur = con.execute("""INSERT OR IGNORE INTO records(rkey, date, user, company, branch, department, checklist,
-                                 todo, task_type, status, remarks, source, timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                              (rk, d.isoformat(), user, _txt(v[0]), branch, dept, cl, _txt(v[3]), tt, status,
-                               _txt(v[7]), 'Imported', stamp))
-            n_recs += cur.rowcount
+            rec_rows.append((rk, d.isoformat(), user, _txt(v[0]), branch, dept, cl, _txt(v[3]), tt, status,
+                             _txt(v[7]), 'Imported', stamp))
             last = max(last, d) if last else d
+        if rec_rows:
+            con.executemany("""INSERT INTO records(rkey, "date", "user", company, branch, department, checklist,
+                               todo, task_type, status, remarks, source, "timestamp") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                               ON CONFLICT DO NOTHING""", rec_rows)
+        n_recs = con.execute('SELECT COUNT(*) FROM records').fetchone()[0] - before
 
     yesterday = core.today(con) - timedelta(days=1)
     core.set_setting(con, 'AUTO_CLOSE_LAST_DATE', min(last or yesterday, yesterday).isoformat())

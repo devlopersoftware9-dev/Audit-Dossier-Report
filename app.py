@@ -24,6 +24,8 @@ app = Flask(__name__)
 
 
 def _secret():
+    if os.environ.get('SECRET_KEY'):
+        return os.environ['SECRET_KEY']
     p = os.path.join(os.path.dirname(core.DB_PATH), 'secret.key')
     os.makedirs(os.path.dirname(p), exist_ok=True)
     if not os.path.exists(p):
@@ -134,7 +136,7 @@ def report_filters():
 def filter_options():
     con = db()
     me = None if session.get('role') == 'Admin' else session['user']
-    q = 'SELECT DISTINCT {c} FROM tasks' + (' WHERE user=? COLLATE NOCASE' if me else '') + ' ORDER BY {c}'
+    q = 'SELECT DISTINCT {c} FROM tasks' + (' WHERE LOWER("user")=LOWER(?)' if me else '') + ' ORDER BY {c}'
     col = lambda c: [r[0] for r in con.execute(q.format(c=c), (me,) if me else ()) if r[0]]
     return dict(users=core.user_names(con, False) if not me else [me], departments=col('depart'),
                 branches=col('branch'), task_types=col('task'))
@@ -177,7 +179,7 @@ def password():
         elif request.form.get('new') in ('admin123', '1234', '123456'):
             flash('Choose a stronger password.', 'danger')
         else:
-            con.execute('UPDATE users SET password_hash=? WHERE username=?',
+            con.execute('UPDATE users SET password_hash=? WHERE LOWER(username)=LOWER(?)',
                         (generate_password_hash(request.form['new']), session['user']))
             con.commit()
             session.pop('must_change', None)
@@ -263,7 +265,7 @@ def report_xlsx():
 @admin_required
 def admin_record(rid):
     con = db()
-    con.execute("UPDATE records SET status=?, remarks=?, source='Admin', timestamp=? WHERE id=?",
+    con.execute('UPDATE records SET status=?, remarks=?, source=\'Admin\', "timestamp"=? WHERE id=?',
                 (1 if request.form.get('status') == '1' else 0, request.form.get('remarks', ''), core.now_text(con), rid))
     core.log(con, session['user'], 'EDIT_RECORD', rid)
     con.commit()
@@ -417,7 +419,7 @@ def admin_users():
         except ValueError:
             salary = 0
         active = 1 if f.get('active') else 0
-        u = con.execute('SELECT id FROM users WHERE username=?', (name,)).fetchone()
+        u = con.execute('SELECT id FROM users WHERE LOWER(username)=LOWER(?)', (name,)).fetchone()
         if not name:
             flash('Username is required.', 'danger')
         elif u:
@@ -435,10 +437,10 @@ def admin_users():
         con.commit()
         return redirect(url_for('admin_users'))
     users = [dict(r) for r in con.execute(
-        'SELECT u.*, (SELECT COUNT(*) FROM tasks t WHERE t.user=u.username COLLATE NOCASE AND t.hidden=0) n '
+        'SELECT u.*, (SELECT COUNT(*) FROM tasks t WHERE LOWER(t."user")=LOWER(u.username) AND t.hidden=0) n '
         'FROM users u ORDER BY role, username')]
     known = {norm(u['username']) for u in users}
-    missing = sorted({r[0] for r in con.execute('SELECT DISTINCT user FROM tasks') if norm(r[0]) not in known})
+    missing = sorted({r[0] for r in con.execute('SELECT DISTINCT "user" FROM tasks') if norm(r[0]) not in known})
     return render_template('users.html', users=users, missing=missing)
 
 
@@ -454,7 +456,8 @@ def admin_settings():
         con.commit()
         flash('Settings saved.', 'success')
         return redirect(url_for('admin_settings'))
-    rows = [dict(r) for r in con.execute('SELECT * FROM settings ORDER BY rowid')]
+    order = {k: i for i, (k, _, _) in enumerate(core.DEFAULT_SETTINGS)}
+    rows = sorted([dict(r) for r in con.execute('SELECT * FROM settings')], key=lambda r: (order.get(r['key'], 99), r['key']))
     return render_template('settings.html', rows=rows,
                            counts=dict(tasks=con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0],
                                        records=con.execute('SELECT COUNT(*) FROM records').fetchone()[0]))
@@ -502,8 +505,25 @@ def admin_import():
 @admin_required
 def admin_backup():
     con = db()
-    con.execute('PRAGMA wal_checkpoint(FULL)')
-    return send_file(core.DB_PATH, as_attachment=True, download_name=f'audit_backup_{core.today(con)}.db')
+    if not core.IS_PG:
+        con.execute('PRAGMA wal_checkpoint(FULL)')
+        return send_file(core.DB_PATH, as_attachment=True, download_name=f'audit_backup_{core.today(con)}.db')
+    # Postgres: full export of every table as one Excel file
+    wb = Workbook()
+    wb.remove(wb.active)
+    for table in ('tasks', 'records', 'users', 'settings', 'monthly_snapshots', 'audit_log'):
+        cur = con.execute(f'SELECT * FROM {table} ORDER BY 1')
+        rows = cur.fetchall()
+        ws = wb.create_sheet(table)
+        if rows:
+            cols = [k for k in rows[0].keys() if k != 'password_hash']
+            ws.append(cols)
+            for r in rows:
+                ws.append([r[c] for c in cols])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=f'audit_backup_{core.today(con)}.xlsx')
 
 
 # ------------------------------------------------------------------ start
