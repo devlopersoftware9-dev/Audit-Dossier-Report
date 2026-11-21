@@ -59,18 +59,15 @@ or run `python import_excel.py "Audit Dossier Web.xlsx" --replace` from the comm
 | `data/audit.db` | **The local database**. Back up this file regularly. |
 | `tests/test_app.py` | Full test: `AUDIT_XLSX=sheet.xlsx python tests/test_app.py` |
 
-## Live on the internet (free: Render + Neon, both with "Sign in with GitHub")
+## Live on the internet (free: GitHub Pages + Firebase)
 
-The website runs on **Render**. The data is kept in a free **Neon** PostgreSQL database, so it stays safe through restarts.
-On the office PC (`run.bat`) the same code uses the local SQLite file instead.
+**Live link:** https://devlopersoftware9-dev.github.io/Audit-Dossier-Report/
 
-1. **Neon** (database): go to https://neon.tech → *Sign in with GitHub* → create a project (region: Singapore).
-   Copy the **connection string** (`postgresql://...neon.tech/neondb?sslmode=require...`).
-2. **Render** (website): go to https://render.com → *Sign in with GitHub* → **New + → Blueprint** →
-   select this repository. `render.yaml` sets everything up. When it asks, paste the Neon string into **DATABASE_URL**.
-3. After the deploy finishes, open the link (`https://audit-dossier-xxxx.onrender.com`). Log in as `admin / admin123`.
-   You are asked to set a new password straight away.
-4. Go to **Settings → Import**, upload the Google Sheet (.xlsx), then set passwords and salaries under **Users**.
+- The website is the `docs/` folder, served free by GitHub Pages.
+- The data is stored in **Firebase Firestore** and logins use **Firebase Authentication** (project `rc-audit-dossier`). It runs on the free **Spark** plan, with no card needed.
+- Security rules are in `firestore.rules` (pasted into Firebase console → Firestore → Rules).
+- The first time the site opens, it shows **First-time setup** so you can create the Admin login. After that, go to **Settings → Import** and upload the Google Sheet (.xlsx).
+- Officer logins are created by the import (default password `Audit@123`) or under **Users**. Everyone must set their own password at first login.
+- Missed tasks become FALSE automatically the next time anyone logs in. The admin's login closes every officer's pending days.
 
-On the free plan the site sleeps after 15 minutes without visitors. The first page after that takes about 30–50 seconds to open.
-To update the site, push to the `audit-portal-system` branch and Render deploys it again automatically.
+The Python version (`app.py`, `run.bat`) is still here for running on an office PC without internet.

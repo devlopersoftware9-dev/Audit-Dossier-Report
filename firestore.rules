@@ -1,0 +1,56 @@
+rules_version = '2';
+// Audit Dossier Portal — Firestore security rules (paste in Firebase console → Firestore → Rules).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function profPath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function prof() { return get(profPath()).data; }
+    function active() { return signedIn() && exists(profPath()) && prof().active == true; }
+    function admin() { return active() && prof().role == 'Admin'; }
+    function setupDone() { return exists(/databases/$(database)/documents/meta/setup); }
+    function myLc() { return prof().username_lc; }
+
+    // first-run flag (public so the login page knows whether to show "First-time setup")
+    match /meta/{id} {
+      allow read: if true;
+      allow create: if admin() && !setupDone();
+      allow update, delete: if false;
+    }
+
+    // username -> internal login e-mail (public, needed before login)
+    match /usernames/{name} {
+      allow read: if true;
+      allow create: if admin() || (signedIn() && !setupDone() && request.resource.data.uid == request.auth.uid);
+      allow update, delete: if admin();
+    }
+
+    match /users/{uid} {
+      allow read: if active();
+      allow create: if admin()
+        || (signedIn() && !setupDone() && uid == request.auth.uid && request.resource.data.role == 'Admin');
+      allow update: if admin()
+        || (active() && uid == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['last_login', 'closed_until', 'must_change']));
+      allow delete: if admin();
+    }
+
+    match /tasks/{id}    { allow read: if active(); allow write: if admin(); }
+    match /settings/{id} { allow read: if active(); allow write: if admin(); }
+    match /monthly/{id}  { allow read: if active(); allow write: if admin(); }
+    match /logs/{id}     { allow create: if active(); allow read: if admin(); }
+
+    // date-wise TRUE / FALSE — officers only see and write their own
+    match /records/{id} {
+      allow read: if admin() || (active() && resource.data.user_lc == myLc());
+      allow create: if admin()
+        || (active() && request.resource.data.user_lc == myLc()
+            && request.resource.data.source in ['Portal', 'Extra', 'Auto-Closed']);
+      allow update: if admin()
+        || (active() && resource.data.user_lc == myLc() && request.resource.data.user_lc == myLc()
+            && resource.data.source != 'Auto-Closed' && resource.data.source != 'Admin'
+            && request.resource.data.source in ['Portal', 'Extra']
+            && request.resource.data.date == resource.data.date);
+      allow delete: if admin();
+    }
+  }
+}
