@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="row g-2">
+  <div class="col-lg-8"><form method="post" class="panel">
+    <h6>Fines, grades &amp; rules</h6>
+    <table class="table table-sm table-bordered mb-2">
+      <thead><tr><th>Setting</th><th style="width:38%">Value</th><th>Help</th></tr></thead>
+      <tbody>
+      {% for s in rows %}
+        <tr><td class="small fw-bold">{{ s.key }}</td>
+          <td>{% if s.key == 'FINE_MODE' %}
+            <select name="s_{{ s.key }}" class="form-select form-select-sm">{% for m in ['NONE', 'PER_TASK', 'PERCENT', 'BOTH'] %}<option {{ 'selected' if m == (s.value or '').upper() }}>{{ m }}</option>{% endfor %}</select>
+          {% else %}
+            <input name="s_{{ s.key }}" value="{{ s.value or '' }}" class="form-control form-control-sm" {{ 'readonly' if s.key == 'AUTO_CLOSE_LAST_DATE' }}>
+          {% endif %}</td>
+          <td class="small muted">{{ s.note }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <button class="btn btn-primary btn-sm">Save Settings</button>
+  </form></div>
+  <div class="col-lg-4">
+    <form method="post" action="{{ url_for('admin_close_day') }}" class="panel">
+      <h6>Close a past day</h6>
+      <div class="small muted mb-2">Saves FALSE for every task due on that date that has no TRUE / FALSE. This also happens automatically every day.</div>
+      <input type="date" name="date" class="form-control form-control-sm mb-2" required>
+      <button class="btn btn-outline-danger btn-sm w-100" onclick="return confirm('Save FALSE for unmarked tasks of this date?')">Close this date</button>
+    </form>
+    <form method="post" action="{{ url_for('admin_import') }}" enctype="multipart/form-data" class="panel">
+      <h6>Import from the old Google Sheet</h6>
+      <div class="small muted mb-2">In Google Sheets, go to File → Download → Microsoft Excel (.xlsx), then upload the file here. It reads Sort_List (tasks) and Officer_Master_DB (history).
+        The database has {{ counts.tasks }} task rows and {{ counts.records }} records.</div>
+      <input type="file" name="file" accept=".xlsx" class="form-control form-control-sm mb-2" required>
+      <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="replace" value="1" id="rep"><label for="rep" class="form-check-label small">Replace ALL current tasks and records</label></div>
+      <button class="btn btn-outline-dark btn-sm w-100">Import</button>
+    </form>
+    <div class="panel">
+      <h6>Backup</h6>
+      <a class="btn btn-outline-success btn-sm w-100" href="{{ url_for('admin_backup') }}">⬇ Download database backup</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

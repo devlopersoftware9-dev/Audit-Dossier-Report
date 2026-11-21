@@ -1,0 +1,22 @@
+{% macro select(name, label, options, value, all_label) %}
+<div class="col-md-2"><label class="form-label small fw-bold">{{ label }}</label>
+  <select name="{{ name }}" class="form-select form-select-sm">
+    {% if all_label %}<option value="">{{ all_label }}</option>{% endif %}
+    {% for o in options %}<option {{ 'selected' if o == value }}>{{ o }}</option>{% endfor %}
+  </select></div>
+{% endmacro %}
+
+{% macro pct_bar(p) %}
+{% set c = '#198754' if p >= 85 else ('#0d6efd' if p >= 70 else ('#fd7e14' if p >= 50 else '#dc3545')) %}
+<div class="d-flex align-items-center gap-2"><div class="pct-bar"><div style="width:{{ [p, 100] | min }}%;background:{{ c }}"></div></div><b style="color:{{ c }}">{{ p }}%</b></div>
+{% endmacro %}
+
+{% macro money(v) %}{{ '{:,.0f}'.format(v or 0) }}{% endmacro %}
+
+{% macro common_filters(f, opts, is_admin) %}
+<div class="col-md-2"><label class="form-label small fw-bold">Start Date</label><input type="date" name="start" value="{{ f.start }}" class="form-control form-control-sm"></div>
+<div class="col-md-2"><label class="form-label small fw-bold">End Date</label><input type="date" name="end" value="{{ f.end }}" class="form-control form-control-sm"></div>
+{% if is_admin %}{{ select('user', 'User', opts.users, f.user, 'All users') }}{% endif %}
+{{ select('department', 'Department', opts.departments, f.department, 'All departments') }}
+{{ select('branch', 'Branch', opts.branches, f.branch, 'All branches') }}
+{% endmacro %}

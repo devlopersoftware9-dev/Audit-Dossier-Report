@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% from '_macros.html' import common_filters, pct_bar, money %}
+{% block content %}
+{% set t = today %}
+<form method="get" class="panel">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="m-0">Efficiency &amp; Fine Report</h5>
+    <div class="d-flex gap-1 flex-wrap">
+      {% set y = (t - t.resolution) %}
+      {% set mstart = t.replace(day=1) %}{% set lmend = mstart - t.resolution %}
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('efficiency', start=y, end=y, group_by=f.group_by, user=f.user) }}">Yesterday</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('efficiency', start=t - t.resolution * 7, end=y, group_by=f.group_by, user=f.user) }}">Last 7 days</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('efficiency', start=mstart, end=t, group_by=f.group_by, user=f.user) }}">This month</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('efficiency', start=lmend.replace(day=1), end=lmend, group_by=f.group_by, user=f.user) }}">Last month</a>
+      <a class="btn btn-success btn-sm" href="{{ url_for('efficiency_xlsx', **dict(f)) }}">⬇ Export Excel</a>
+    </div>
+  </div>
+  <div class="row g-2">
+    {{ common_filters(f, opts, is_admin) }}
+    <div class="col-md-2"><label class="form-label small fw-bold">Group by</label>
+      <select name="group_by" class="form-select form-select-sm">
+        {% for v, l in [('user', 'User'), ('department', 'Department'), ('checklist', 'Check List'), ('branch', 'Branch'), ('task_type', 'Task Type'), ('date', 'Date')] %}
+        <option value="{{ v }}" {{ 'selected' if f.group_by == v }}>{{ l }}</option>{% endfor %}
+      </select></div>
+  </div>
+  <button class="btn btn-primary w-100 mt-2 btn-sm">Generate</button>
+  <div class="small muted mt-1">Efficiency % = TRUE ÷ (TRUE + FALSE). Unmarked tasks are saved as FALSE automatically the next day. Tasks ticked on a day they were not due ("Extra") are not counted.</div>
+</form>
+
+<div class="panel">
+  <div class="mb-2">
+    <span class="badge bg-secondary">Scheduled: {{ data.totals.total }}</span>
+    <span class="badge bg-success">Done: {{ data.totals.done }}</span>
+    <span class="badge bg-danger">Missed: {{ data.totals.missed }}</span>
+    <span class="badge bg-primary">Efficiency: {{ data.totals.pct }}%</span>
+    <span class="badge bg-dark">Total fine: Rs {{ money(data.totals.total_fine) }}</span>
+    <span class="small muted">Fine mode: {{ data.mode }}</span>
+  </div>
+  <div class="table-wrap">
+  {% if not data.rows %}<div class="text-center p-4 muted">No records in this range.</div>{% else %}
+  <table class="table table-sm table-bordered table-hover tbl mb-0">
+    <thead><tr><th>{{ data.group_by | replace('_', ' ') | title }}</th><th>Scheduled</th><th>Done (TRUE)</th><th>Missed (FALSE)</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Per-task Fine</th>
+      {% if data.show_pct %}<th>Salary</th><th>Deduct %</th><th>% Fine</th>{% endif %}<th>Total Fine</th></tr></thead>
+    <tbody>
+    {% for g in data.rows %}
+      <tr><td>{{ g.key }}</td><td>{{ g.total }}</td><td class="text-success">{{ g.done }}</td><td class="text-danger">{{ g.missed }}</td>
+        <td>{{ pct_bar(g.pct) }}</td><td class="grade">{{ g.grade }}</td><td>{{ money(g.task_fine) }}</td>
+        {% if data.show_pct %}<td>{{ money(g.salary) }}</td><td>{{ g.deduct_pct }}%</td><td>{{ money(g.pct_fine) }}</td>{% endif %}
+        <td><b>{{ money(g.total_fine) }}</b></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  </div>
+</div>
+{% endblock %}

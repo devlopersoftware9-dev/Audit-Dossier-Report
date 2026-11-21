@@ -1,0 +1,28 @@
+body { background: #f4f6f9; font-size: 14px; }
+.app-title { font-weight: 700; font-size: 1.5rem; }
+.login-box { max-width: 380px; margin: 12vh auto; }
+.panel { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-bottom: 8px; }
+.stat-card { border-radius: 6px; color: #fff; padding: 10px 14px; height: 100%; }
+.stat-card .lbl { font-size: 12px; font-weight: 600; }
+.stat-card .val { font-size: 26px; line-height: 1.15; }
+.bg-blue { background: #0d6efd; } .bg-green { background: #198754; } .bg-amber { background: #fd7e14; }
+.bg-slate { background: #495057; } .bg-teal { background: #0aa2c0; } .bg-red { background: #dc3545; }
+.pill-bar .btn { margin: 0 4px 6px 0; font-size: 13px; }
+.tbl thead th { background: #212529; color: #fff; font-weight: 600; white-space: nowrap; position: sticky; top: 0; z-index: 2; }
+.tbl td { vertical-align: middle; }
+.grp-row td { background: #e9ecef !important; cursor: pointer; font-weight: 700; color: #0d6efd; text-transform: uppercase; letter-spacing: .5px; font-size: 13px; }
+.task-badge { background: #212529; color: #fff; font-size: 11px; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
+.mark-box { width: 22px; height: 22px; cursor: pointer; }
+.remarks-in { background: #fffbea; min-width: 170px; }
+.row-done td { background: #eef9f1 !important; }
+.saving { opacity: .5; pointer-events: none; }
+.link-btn { color: #0d6efd; text-decoration: underline; cursor: pointer; background: none; border: 0; padding: 0; text-align: left; }
+.detail-item { border-left: 4px solid #0d6efd; background: #f4f6f9; padding: 8px 12px; margin-bottom: 10px; }
+.detail-item b { color: #0d6efd; }
+.table-wrap { max-height: 70vh; overflow: auto; }
+.pct-bar { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; min-width: 80px; flex-grow: 1; }
+.pct-bar > div { height: 100%; }
+.muted { color: #6c757d; }
+.hidden-row td { color: #adb5bd; }
+.grade { font-weight: 700; }
+@media (max-width: 768px) { .stat-card .val { font-size: 20px; } }

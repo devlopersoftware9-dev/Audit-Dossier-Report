@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+{% block content %}
+{% set qs = {'user': view_as} if is_admin and view_as else {} %}
+<div class="row g-2 mb-2">
+  <div class="col-6 col-md-2"><div class="stat-card bg-blue"><div class="lbl">Total Tasks (Today)</div><div class="val" id="cTotal">{{ dash.today.total }}</div></div></div>
+  <div class="col-6 col-md-2"><div class="stat-card bg-teal"><div class="lbl">Completed</div><div class="val" id="cDone">{{ dash.today.done }}</div></div></div>
+  <div class="col-6 col-md-2"><div class="stat-card bg-amber"><div class="lbl">Pending</div><div class="val" id="cPending">{{ dash.today.pending }}</div></div></div>
+  <div class="col-6 col-md-2"><div class="stat-card bg-green"><div class="lbl">Completion Progress</div><div class="val" id="cPct">{{ dash.today.pct }}%</div></div></div>
+  <div class="col-6 col-md-2"><div class="stat-card bg-slate"><div class="lbl">This Month Efficiency</div><div class="val">{{ dash.mtd.pct ~ '%' if dash.mtd.total else '–' }}</div></div></div>
+  <div class="col-6 col-md-2"><div class="stat-card bg-red"><div class="lbl">This Month Fine (Rs)</div><div class="val">{{ '{:,.0f}'.format(dash.mtd.total_fine or 0) }}</div></div></div>
+</div>
+
+<div class="d-flex flex-wrap justify-content-between align-items-start">
+  <div class="pill-bar">
+    <a class="btn btn-sm {{ 'btn-dark' if tab == 'today' else 'btn-outline-dark' }}" href="{{ url_for('tasks', **qs) }}">Todays Task</a>
+    {% for d in depts %}<a class="btn btn-sm {{ 'btn-primary' if tab == 'dept' and val == d else 'btn-outline-primary' }}" href="{{ url_for('tasks', tab='dept', v=d, **qs) }}">{{ d }}</a>{% endfor %}
+    {% for b in branches %}<a class="btn btn-sm {{ 'btn-info text-white' if tab == 'branch' and val == b else 'btn-outline-info' }}" href="{{ url_for('tasks', tab='branch', v=b, **qs) }}">Branch: {{ b }}</a>{% endfor %}
+  </div>
+  <div class="d-flex gap-2 mb-2">
+    {% if is_admin %}
+    <form method="get" class="d-flex gap-1">
+      <input type="hidden" name="tab" value="{{ tab }}"><input type="hidden" name="v" value="{{ val }}">
+      <select name="user" class="form-select form-select-sm" onchange="this.form.submit()" title="View as">
+        <option value="">All users</option>
+        {% for o in officers %}<option {{ 'selected' if o == view_as }}>{{ o }}</option>{% endfor %}
+      </select>
+    </form>
+    {% endif %}
+    <a class="btn btn-sm btn-success text-nowrap" href="{{ url_for('tasks_xlsx', tab=tab, v=val, **qs) }}">⬇ Export Excel</a>
+  </div>
+</div>
+
+<div class="panel"><div class="table-wrap">
+{% if not rows %}
+  <div class="text-center p-4 muted">{{ 'No task due today 🎉' if tab == 'today' else 'No tasks in this tab.' }}</div>
+{% else %}
+<table class="table table-bordered table-striped table-hover table-sm tbl mb-0">
+  <thead><tr>
+    {% if tab == 'today' %}
+      <th>Company</th><th>Branch Name</th><th>Task</th><th>Depart</th><th>Check List</th><th>SOP</th><th>Target Day / Date</th><th>Recurrence</th>{% if is_admin %}<th>User</th>{% endif %}<th>Remarks</th><th>Mark</th>
+    {% else %}
+      <th>Depart</th><th>Check List</th><th>Task</th><th>Recurrence</th><th>Target Day / Date</th><th>Company</th><th>Branch Name</th><th>SOP</th>{% if is_admin %}<th>User</th>{% endif %}<th>Due Today</th><th>Remarks</th><th>Mark</th>
+    {% endif %}
+  </tr></thead>
+  <tbody>
+  {% set ncol = 11 if tab == 'today' else 12 %}{% if is_admin %}{% set ncol = ncol + 1 %}{% endif %}
+  {% for r in rows %}
+    {% if loop.first or r.bucket != rows[loop.index0 - 1].bucket %}
+    <tr class="grp-row" data-bucket="{{ r.bucket }}"><td colspan="{{ ncol }}">📋 {{ r.bucket }} tasks ({{ rows | selectattr('bucket', 'equalto', r.bucket) | list | length }}) ↕ <span class="fw-normal">(click to collapse / expand)</span></td></tr>
+    {% endif %}
+    {% set cl %}<button type="button" class="link-btn" data-detail='{{ {"title": r.checklist, "details": r.details, "meta": r.depart ~ " · " ~ r.task ~ " · " ~ r.recurrence ~ " (" ~ r.target ~ ") · " ~ r.company ~ " / " ~ r.branch ~ " · User: " ~ r.user ~ ((" · " ~ r.start_time ~ " – " ~ r.end_time) if r.start_time else ""), "url": r.checklist_url, "sop": r.sop_name, "sop_url": r.sop_url} | tojson | forceescape }}'>{{ r.checklist }}</button>{% endset %}
+    {% set sop %}{% if r.sop_url %}<a href="{{ r.sop_url }}" target="_blank" rel="noopener">{{ r.sop_name or 'Open SOP' }}</a>{% else %}{{ r.sop_name }}{% endif %}{% endset %}
+    <tr class="b-{{ r.bucket | replace(' ', '') | replace('/', '') }} {{ 'row-done' if r.status }}" data-key="{{ r.key }}">
+      {% if tab == 'today' %}
+        <td>{{ r.company }}</td><td>{{ r.branch }}</td><td><span class="task-badge">{{ r.task }}</span></td><td>{{ r.depart }}</td>
+        <td>{{ cl }}</td><td>{{ sop }}</td><td>{{ r.target }}</td><td>{{ r.recurrence }}</td>{% if is_admin %}<td>{{ r.user }}</td>{% endif %}
+      {% else %}
+        <td>{{ r.depart }}</td><td>{{ cl }}</td><td>{{ r.task }}</td><td>{{ r.recurrence }}</td><td>{{ r.target }}</td><td>{{ r.company }}</td>
+        <td>{{ r.branch }}</td><td>{{ sop }}</td>{% if is_admin %}<td>{{ r.user }}</td>{% endif %}
+        <td>{% if r.due_today %}<span class="badge bg-primary">Y</span>{% else %}<span class="muted">N</span>{% endif %}</td>
+      {% endif %}
+      <td><input class="form-control form-control-sm remarks-in" value="{{ r.remarks }}" placeholder="Enter remarks…"></td>
+      <td class="text-center"><input type="checkbox" class="form-check-input mark-box" {{ 'checked' if r.status }}
+          title="{{ ('Saved ' ~ r.marked_at) if r.marked_at else 'Not saved yet' }}"></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div></div>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block public %}
+<div class="login-box panel p-4">
+  <h4 class="mb-1">{{ app_title }}</h4>
+  <div class="muted mb-3">Sign in with your username</div>
+  {% with msgs = get_flashed_messages(with_categories=true) %}{% for cat, m in msgs %}<div class="alert alert-{{ cat }} py-2">{{ m }}</div>{% endfor %}{% endwith %}
+  <form method="post">
+    <input name="username" class="form-control mb-2" placeholder="Username" autocomplete="username" required autofocus>
+    <input name="password" type="password" class="form-control mb-3" placeholder="Password" autocomplete="current-password" required>
+    <button class="btn btn-primary w-100">Login</button>
+  </form>
+</div>
+{% endblock %}
