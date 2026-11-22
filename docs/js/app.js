@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=12';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=12';
+import * as L from './logic.js?v=13';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=13';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -948,7 +948,12 @@ async function renderUsers() {
           editing = { ...editing, username: newName, username_lc: L.norm(newName) };
         }
         await updateDoc(doc(db, 'users', editing.uid), { role: v.role, salary: Number(v.salary) || 0, active: !!v.active });
-        if (v.password) await createLogin(editing.username, v.password, { must_change: true });
+        if (v.password) {
+          const self = editing.uid === S.uid;
+          if (self && !(await askConfirm(`Set a new password for your own login "${editing.username}"? You will be logged out and must log in again with the new password.`, 'Set password'))) return;
+          await createLogin(editing.username, v.password, { must_change: !self });
+          if (self) { log('RESET_OWN_PASSWORD', editing.username); toast('Password changed. Please log in again with the new password.'); await signOut(auth); return; }
+        }
         log('SAVE_USER', editing.username);
         toast(v.password ? 'User updated and password reset' : 'User updated');
       } else {
