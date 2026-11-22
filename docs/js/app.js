@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=10';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=10';
+import * as L from './logic.js?v=11';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=11';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -863,7 +863,17 @@ async function renderUsers() {
 
 // ------------------------------------------------------------------ admin: settings, import, backup
 function renderSettings() {
-  mount('settings', `<div class="row g-2"><div class="col-lg-8"><form class="panel" id="sf"><h6>Fines, grades &amp; rules</h6>
+  mount('settings', `<div class="row g-2"><div class="col-lg-8">
+    <div class="panel"><h6>📘 How efficiency and fines are worked out</h6><div class="small" style="line-height:1.7">
+      <b>Who is fined?</b> Always the <b>user (auditor)</b> the task is assigned to (column 1st). Departments are <b>not</b> fined — the department only decides the Rs rate when <code>DEPT_FINES</code> is set, and the Efficiency report grouped by Department shows how much of the users' fines came from each department.<br>
+      <b>What counts?</b> Every task that was due on a day (it showed in Todays Task). At ${esc(closeLabel())} it is saved as <b>TRUE</b> (ticked) or <b>FALSE</b> (not ticked). Triggered tasks and ticks on a day the task was not due ("Extra") are not counted.<br>
+      <b>Efficiency %</b> = TRUE ÷ (TRUE + FALSE) × 100 for the chosen days or month.<br>
+      <b>1) Per-task fine</b> (FINE_MODE PER_TASK or BOTH) = number of FALSE × <code>FINE_PER_TASK</code> (or the department's rate from <code>DEPT_FINES</code>).<br>
+      <b>2) Salary % fine</b> (FINE_MODE PERCENT or BOTH) = monthly salary × the % from <code>FINE_PCT_SLABS</code> for the month's efficiency. Set each user's salary in <b>Users</b>; salary 0 = no % fine.<br>
+      <b>Total fine</b> = 1 + 2. It is final at month end; the month-end snapshot is saved on the 1st.<br>
+      <span class="muted"><b>Example:</b> 300 tasks due in the month, 270 TRUE, 30 FALSE → efficiency 90% → grade A. Per-task: 30 × Rs 100 = Rs 3,000 (if 10 of the 30 were Accounts with <code>Accounts:200</code> → 20×100 + 10×200 = Rs 4,000). Salary %: 90% falls in 85:2 → 2% of Rs 50,000 = Rs 1,000. Total (BOTH) = Rs 4,000 or Rs 5,000.</span>
+    </div></div>
+    <form class="panel" id="sf"><h6>Fines, grades &amp; rules</h6>
     <table class="table table-sm table-bordered mb-2"><thead><tr><th>Setting</th><th style="width:38%">Value</th><th>Help</th></tr></thead><tbody>
     ${L.DEFAULT_SETTINGS.map(([k, , note]) => `<tr><td class="small fw-bold">${k}</td><td>${k === 'FINE_MODE' ? `<select name="${k}" class="form-select form-select-sm">${['NONE', 'PER_TASK', 'PERCENT', 'BOTH'].map((m) => `<option ${m === String(S.settings[k]).toUpperCase() ? 'selected' : ''}>${m}</option>`).join('')}</select>` : `<input name="${k}" value="${esc(S.settings[k])}" class="form-control form-control-sm">`}</td><td class="small muted">${esc(note)}</td></tr>`).join('')}
     </tbody></table><button class="btn btn-primary btn-sm">Save Settings</button></form></div>

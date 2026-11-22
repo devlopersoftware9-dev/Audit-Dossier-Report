@@ -5,17 +5,17 @@ export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export const BUCKET_ORDER = { 'Daily': 1, 'Weekly': 2, 'Fortnightly': 3, 'Monthly': 4, 'Quarterly / Yearly': 5 };
 
 export const DEFAULT_SETTINGS = [
-  ['APP_TITLE', 'Audit Dossier Portal', 'Portal title'],
-  ['FINE_MODE', 'BOTH', 'NONE / PER_TASK / PERCENT / BOTH'],
-  ['FINE_PER_TASK', '100', 'Rs fine for every task left FALSE'],
-  ['FINE_PCT_SLABS', '95:0,85:2,75:5,60:10,0:15', 'Efficiency >= X% -> cut Y% of monthly salary (X:Y)'],
-  ['GRADE_SLABS', '95:A+,85:A,75:B,60:C,0:D', 'Efficiency >= X% -> grade'],
-  ['DEPT_FINES', '', 'Optional per-department fine, e.g. Accounts:200,IT:50'],
-  ['WEEKLY_OFF', 'Fri', 'Off day (no tasks)'],
-  ['WORK_ON_OFF_DAY_COMPANIES', 'RCG', 'Companies that still work on the off day (comma separated)'],
-  ['HIDE_BRANCH_TABS', 'RC', 'Branches without their own "Branch:" tab (comma separated)'],
-  ['UTC_OFFSET_HOURS', '5', 'Time zone (Pakistan = 5)'],
-  ['DAY_CLOSE_HOUR', '23', 'Hour the day closes (23 = 11 PM): ticks saved to the database, unmarked = FALSE, next day starts'],
+  ['APP_TITLE', 'Audit Dossier Portal', 'Name shown at the top of the portal.'],
+  ['FINE_MODE', 'BOTH', 'Which fines are charged: NONE = no fine · PER_TASK = Rs for each missed task · PERCENT = % of monthly salary by efficiency · BOTH = both added together.'],
+  ['FINE_PER_TASK', '100', 'Rs charged to the USER (auditor) for every scheduled task that ends the day FALSE (not ticked by 11 PM).'],
+  ['DEPT_FINES', '', 'Optional: a different Rs per missed task for some departments, e.g. Accounts:200,IT:50. Still charged to the USER — it only changes the rate for tasks of that department. Blank = FINE_PER_TASK for all.'],
+  ['FINE_PCT_SLABS', '95:0,85:2,75:5,60:10,0:15', 'Salary cut by monthly efficiency, highest first. 95:0 = 95% or more → 0% · 85:2 = 85–94.9% → 2% · 75:5 → 5% · 60:10 → 10% · 0:15 = below 60% → 15% of the user\'s monthly salary (set salary in Users).'],
+  ['GRADE_SLABS', '95:A+,85:A,75:B,60:C,0:D', 'Grade by efficiency: 95% or more = A+, 85% = A, 75% = B, 60% = C, below 60% = D.'],
+  ['WEEKLY_OFF', 'Fri', 'Weekly off day — no tasks are due (same as the sheet formula).'],
+  ['WORK_ON_OFF_DAY_COMPANIES', 'RCG', 'Companies that still work on the off day (comma separated). RCG tasks are due on Friday too.'],
+  ['HIDE_BRANCH_TABS', 'RC', 'Branches that do NOT get their own "Branch:" tab (comma separated), e.g. RC,RCG.'],
+  ['UTC_OFFSET_HOURS', '5', 'Time zone: Pakistan = 5.'],
+  ['DAY_CLOSE_HOUR', '23', 'Hour the day closes (23 = 11 PM): the day\'s ticks are saved to the database, unticked tasks become FALSE and the next day starts.'],
 ];
 
 export const norm = (v) => (v == null ? '' : String(v)).trim().toLowerCase();
