@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js';
+import * as L from './logic.js?v=4';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=4';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -159,6 +159,7 @@ function shell(active, inner) {
       <div class="d-flex align-items-center gap-2">
         <span class="muted small">${today()} · ${L.dayName(today())}</span>
         <span class="badge bg-success py-2">User: ${esc(S.prof.username)}${S.isAdmin ? ' (Admin)' : ''}</span>
+        <button class="btn btn-sm btn-outline-secondary" id="btnTheme" title="Light / Dark">${document.documentElement.dataset.bsTheme === 'dark' ? '☀️' : '🌙'}</button>
         <a class="btn btn-sm btn-outline-secondary" href="#/password">Password</a>
         <button class="btn btn-sm btn-outline-danger" id="btnLogout">Logout</button>
       </div>
@@ -173,6 +174,12 @@ function mount(active, inner) {
   S.seq++;
   $('app').innerHTML = shell(active, inner);
   $('btnLogout').onclick = () => signOut(auth);
+  $('btnTheme').onclick = () => {
+    const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.bsTheme = next;
+    try { localStorage.setItem('adp_theme', next); } catch (e) { /* ignore */ }
+    $('btnTheme').textContent = next === 'dark' ? '☀️' : '🌙';
+  };
 }
 const loading = '<div class="text-center p-4 muted"><div class="spinner-border spinner-border-sm"></div> Loading…</div>';
 function pctBar(p) {
@@ -287,7 +294,7 @@ async function renderTasks(q) {
   const card = (cls, lbl, v, id = '') => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val" ${id ? `id="${id}"` : ''}>${v}</div></div></div>`;
   $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-blue', 'Total Tasks (Today)', st.total, 'cTotal')}${card('bg-teal', 'Completed', st.done, 'cDone')}${card('bg-amber', 'Pending', st.pending, 'cPending')}${card('bg-green', 'Completion Progress', st.pct + '%', 'cPct')}${card('bg-slate', 'This Month Efficiency', mtd)}${card('bg-red', 'This Month Fine (Rs)', fine)}</div>
     <div class="d-flex flex-wrap justify-content-between align-items-start">
-      <div class="pill-bar">${pill('today', '', 'Todays Task', 'dark')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
+      <div class="pill-bar">${pill('today', '', 'Todays Task', 'success')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
       <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active).map((u) => u.username), q.user || '')}</select>` : ''}
         <button class="btn btn-sm btn-success text-nowrap" id="btnExp">⬇ Export Excel</button></div>
     </div>
@@ -414,7 +421,7 @@ async function renderMonthly(q) {
   const ym = q.month || today().slice(0, 7);
   const viewLc = S.isAdmin ? L.norm(q.user || '') : S.prof.username_lc;
   mount('monthly', `<div class="panel"><div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2"><h5 class="m-0">Monthly Performance</h5>
-    <div class="d-flex gap-1">${S.isAdmin ? '<button class="btn btn-outline-dark btn-sm" id="btnSave">💾 Save month-end snapshot</button>' : ''}<button class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
+    <div class="d-flex gap-1">${S.isAdmin ? '<button class="btn btn-outline-secondary btn-sm" id="btnSave">💾 Save month-end snapshot</button>' : ''}<button class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
     <form id="mf" class="row g-2 align-items-end"><div class="col-md-2"><label class="form-label small fw-bold">Month</label><input type="month" name="month" value="${ym}" class="form-control form-control-sm"></div>
     ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(S.users.map((u) => u.username), q.user || '', 'All users')}</select></div>` : ''}
     <div class="col-md-2"><button class="btn btn-primary btn-sm w-100">Show</button></div><div class="col-md-6 small muted" id="mInfo"></div></form></div>
@@ -510,27 +517,97 @@ function renderTaskForm(q) {
   const edit = q.id ? S.tasks.find((x) => x.id === q.id) : null;
   const src = edit || (q.copy ? S.tasks.find((x) => x.id === q.copy) : null);
   const t = src ? { ...src, detail: edit ? src.detail : '' } : { company: 'RC', branch: 'RC', recurrence: 'Daily', target: 'Daily', audit_type: 'Post-Audit' };
-  const Ls = L.listings(S.tasks, S.users.map((u) => u.username));
-  const field = (name, label, cols = 3, list = null, type = 'text', req = false, ph = '') => `<div class="col-md-${cols}"><label class="form-label small fw-bold">${label}${req ? ' *' : ''}</label>
+  const Ls = L.listings(S.tasks, S.users.filter((u) => !u.replaced_by).map((u) => u.username));
+  const lab = (label, req) => `<label class="form-label small fw-semibold">${label}${req ? ' <span class="text-danger">*</span>' : ''}</label>`;
+  // text box
+  const field = (name, label, cols = 3, type = 'text', req = false, ph = '', list = '') => `<div class="col-md-${cols}">${lab(label, req)}
     <input name="${name}" type="${type}" value="${esc(t[name] ?? '')}" class="form-control form-control-sm" ${list ? `list="dl_${list}"` : ''} ${req ? 'required' : ''} placeholder="${esc(ph)}" autocomplete="off"></div>`;
-  mount('admin', `<form id="tf" class="panel"><h5>${edit ? 'Edit Task' : 'Add New Task'}</h5><div class="row g-2">
-    ${field('depart', 'Department', 3, 'depart', 'text', true)}${field('checklist', 'Check List', 5, 'checklist', 'text', true)}${field('task', 'Task', 4, 'task', 'text', true, 'Daily Followup, Weekly Round, Accounts Batch…')}
-    <div class="col-12"><label class="form-label small fw-bold">Check list Detail (point)</label><textarea name="detail" rows="2" class="form-control form-control-sm">${esc(t.detail || '')}</textarea></div>
-    ${field('user', 'User (assigned to)', 2, 'user', 'text', true)}${field('company', 'Company', 2, 'company', 'text', true)}${field('branch', 'Branch', 2, 'branch', 'text', true)}${field('audit_type', 'Pre / Post Audit', 2, 'audit_type')}
-    ${field('recurrence', 'Recurrence', 2, 'recurrence', 'text', true)}${field('target', 'Target Day / Date', 2, 'target', 'text', true)}${field('target_month', 'Target Month (Qtr / Yearly)', 2, null, 'number')}
-    ${field('start_time', 'Start Time', 2, null, 'time')}${field('end_time', 'End Time', 2, null, 'time')}${field('ordered_by', 'Ordered By', 2)}${field('remarks', 'Remarks', 4)}</div>
-    <div class="border rounded p-2 mt-3 bg-light"><div class="small fw-bold mb-1">SOP / Links <span class="muted fw-normal">(optional — leave blank if there is no SOP)</span></div><div class="row g-2">
-      ${field('sop_name', 'SOP name', 4, null, 'text', false, 'e.g. Bilty receiving (WH / Receipt room)')}${field('sop_url', 'SOP link', 4, null, 'text', false, 'https://docs.google.com/…')}${field('checklist_url', 'Check list document link', 4, null, 'text', false, 'optional')}</div></div>
-    <div class="form-check mt-2"><input class="form-check-input" type="checkbox" name="hidden" id="hid" ${t.hidden ? 'checked' : ''}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>
-    <div class="small muted mt-2"><b>Target Day / Date:</b> <code>Daily</code> = every day · <code>Mon … Sun</code> = weekly on that day · <code>1 – 31</code> = that date every month (one day earlier if it falls on Friday) · <code>Triggered</code> = never in Today's list, only in its department tab. Friday is off except for company RCG.</div>
+  // dropdown (like the sheet) + "Other" to type a new value
+  const dd = (name, label, cols, options, req = false) => {
+    const cur = String(t[name] ?? '');
+    const all = [...new Set([...options, ...(cur ? [cur] : [])])];
+    return `<div class="col-md-${cols}">${lab(label, req)}
+      <select name="${name}" class="form-select form-select-sm dd" ${req ? 'required' : ''}><option value="">— select —</option>
+      ${all.map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}<option value="__other">➕ Other (type new)…</option></select>
+      <input class="form-control form-control-sm mt-1 d-none other" data-for="${name}" placeholder="Type new ${esc(label)}"></div>`;
+  };
+  mount('admin', `<form id="tf" class="panel"><div class="d-flex justify-content-between align-items-center mb-2"><h5 class="m-0">${edit ? 'Edit Task' : 'Add New Task'}</h5><a class="btn btn-sm btn-outline-secondary" href="#/admin/tasks">← Back</a></div>
+    <div class="section-title">1. Check list</div><div class="row g-2">
+      ${dd('depart', 'Department', 3, Ls.depart, true)}
+      ${field('checklist', 'Check List', 5, 'text', true, 'Pick or type — same name joins points together', 'checklist')}
+      ${dd('task', 'Task', 4, Ls.task, true)}
+      <div class="col-12">${lab('Check list Detail (point)')}<textarea name="detail" rows="2" class="form-control form-control-sm" placeholder="What exactly has to be checked">${esc(t.detail || '')}</textarea></div>
+    </div>
+    <div class="section-title">2. Who &amp; where</div><div class="row g-2">
+      ${dd('user', '1st — User (assigned to)', 3, Ls.user, true)}
+      ${dd('company', 'Company', 3, Ls.company, true)}
+      ${dd('branch', 'Branch Name', 3, Ls.branch, true)}
+      ${dd('audit_type', 'Triggered / Daily Work', 3, Ls.audit_type)}
+    </div>
+    <div class="section-title">3. When (decides the Y in Todays Task)</div><div class="row g-2">
+      ${dd('recurrence', 'Recurrence', 3, Ls.recurrence, true)}
+      <div class="col-md-3">${lab('Target Day / Date', true)}<select name="target" id="tgt" class="form-select form-select-sm" required></select></div>
+      <div class="col-md-2" id="tmWrap">${lab('Target Month')}<select name="target_month" id="tm" class="form-select form-select-sm"><option value="">—</option>${L.SHEET_LISTS.months.map((m) => `<option ${String(t.target_month) === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
+      ${field('start_time', 'Start Time', 2, 'time')}${field('end_time', 'End Time', 2, 'time')}
+      <div class="col-12"><div class="due-box" id="due"></div></div>
+    </div>
+    <div class="section-title">4. SOP / links <span class="muted fw-normal small">(optional — leave blank if there is no SOP)</span></div><div class="row g-2">
+      ${field('sop_name', 'SOP name', 4, 'text', false, 'e.g. Bilty receiving (WH / Receipt room)')}${field('sop_url', 'SOP link', 4, 'text', false, 'https://docs.google.com/…')}${field('checklist_url', 'Check list document link', 4, 'text', false, 'optional')}
+      ${field('ordered_by', 'Ordered By', 4)}${field('remarks', 'Remarks', 8)}
+    </div>
+    <div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="hidden" id="hid" ${t.hidden ? 'checked' : ''}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>
     <div id="terr" class="text-danger small mt-2"></div>
-    <div class="d-flex gap-2 mt-3"><button class="btn btn-primary btn-sm" name="go" value="save">Save</button>${edit ? '' : '<button class="btn btn-outline-primary btn-sm" name="go" value="again">Save &amp; add another point</button>'}<a class="btn btn-secondary btn-sm" href="#/admin/tasks">Cancel</a></div></form>
-    ${Object.entries(Ls).map(([k, v]) => `<datalist id="dl_${k}">${v.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`).join('')}`);
-  $('tf').onsubmit = async (ev) => {
+    <div class="d-flex gap-2 mt-3"><button class="btn btn-primary btn-sm px-4" name="go" value="save">Save</button>${edit ? '' : '<button class="btn btn-outline-primary btn-sm" name="go" value="again">Save &amp; add another point</button>'}<a class="btn btn-secondary btn-sm" href="#/admin/tasks">Cancel</a></div></form>
+    <datalist id="dl_checklist">${Ls.checklist.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`);
+
+  const form = $('tf');
+  const val = (name) => {
+    const el = form.querySelector(`[name="${name}"]`);
+    if (el && el.value === '__other') return form.querySelector(`.other[data-for="${name}"]`).value.trim();
+    return el ? el.value : '';
+  };
+  // Target Day/Date list follows Recurrence (Daily / Mon-Sun / 1-31 / Triggered), like the sheet
+  const fillTargets = (keep) => {
+    const opts = L.targetsFor(val('recurrence'));
+    const cur = keep ?? $('tgt').value;
+    const list = [...new Set([...opts, ...(cur && !opts.includes(cur) ? [cur] : [])])];
+    $('tgt').innerHTML = `<option value="">— select —</option>` + list.map((o) => `<option ${o === cur ? 'selected' : ''}>${o}</option>`).join('');
+    if (list.length === 1 && !cur) $('tgt').value = list[0];
+    $('tmWrap').classList.toggle('opacity-50', !L.needsMonth(val('recurrence')));
+    $('tm').disabled = !L.needsMonth(val('recurrence'));
+  };
+  // live preview: is it Y today, and the next due dates
+  const preview = () => {
+    const x = { checklist: val('checklist') || 'x', task: val('task') || 'x', recurrence: val('recurrence'), target: $('tgt').value,
+      target_month: $('tm').value, company: val('company') };
+    if (!x.target) { $('due').innerHTML = '<span class="muted">Choose Recurrence and Target to see when this task will appear.</span>'; return; }
+    const tk = today();
+    const y = L.isScheduled(x, tk, opts());
+    const next = L.nextDueDates(x, tk, opts(), 6);
+    $('due').innerHTML = `<b>Today (${tk}, ${L.dayName(tk)}):</b> ${y ? '<span class="badge bg-success">Y — shows in Todays Task</span>' : '<span class="badge bg-secondary">N</span>'}
+      &nbsp; <b>Next due:</b> ${next.length ? next.map((d) => `<span class="badge text-bg-light border">${d} ${L.dayName(d)}</span>`).join(' ') : '<span class="muted">never in Todays Task (Triggered — use its department tab)</span>'}`;
+  };
+  fillTargets(String(t.target ?? ''));
+  preview();
+  form.addEventListener('change', (ev) => {
+    if (ev.target.classList.contains('dd')) {
+      const o = form.querySelector(`.other[data-for="${ev.target.name}"]`);
+      o.classList.toggle('d-none', ev.target.value !== '__other');
+      if (ev.target.value === '__other') o.focus();
+    }
+    if (ev.target.name === 'recurrence' || ev.target.dataset.for === 'recurrence') fillTargets();
+    preview();
+  });
+  form.addEventListener('input', (ev) => { if (ev.target.classList.contains('other')) preview(); });
+
+  form.onsubmit = async (ev) => {
     ev.preventDefault();
     const again = ev.submitter && ev.submitter.value === 'again';
     try {
-      const c = L.cleanTask(readForm(ev.target));
+      const data = readForm(form);
+      form.querySelectorAll('select.dd').forEach((s) => { data[s.name] = val(s.name); });
+      if (!L.needsMonth(data.recurrence)) data.target_month = '';
+      const c = L.cleanTask(data);
       const ts = nowText();
       let id = edit?.id;
       if (edit) {
@@ -632,7 +709,7 @@ function renderSettings() {
     <div class="col-lg-4">
       <div class="panel"><h6>Import from the old Google Sheet</h6><div class="small muted mb-2">In Google Sheets, go to File → Download → Microsoft Excel (.xlsx), then choose the file here. It reads Sort_List (tasks) and Officer_Master_DB (history). It also creates a login for every user name in column G (password <b>Audit@123</b>; they set their own at first login).<br>Tasks in database: <b>${S.tasks.length}</b>.</div>
         <input type="file" id="xf" accept=".xlsx" class="form-control form-control-sm mb-2"><div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="rep"><label for="rep" class="form-check-label small">Replace ALL current tasks and records</label></div>
-        <button class="btn btn-outline-dark btn-sm w-100" id="btnImp">Import</button><div class="progress-log mt-2 d-none" id="ilog"></div></div>
+        <button class="btn btn-outline-secondary btn-sm w-100" id="btnImp">Import</button><div class="progress-log mt-2 d-none" id="ilog"></div></div>
       <div class="panel"><h6>Close a past day</h6><div class="small muted mb-2">Saves FALSE for every task due on that date that has no TRUE / FALSE. This also happens automatically every day.</div>
         <input type="date" id="cd" class="form-control form-control-sm mb-2"><button class="btn btn-outline-danger btn-sm w-100" id="btnClose">Close this date</button></div>
       <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div></div></div>`);
@@ -772,6 +849,26 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
+// New day while the page is open (after 12:00 at night): save yesterday's unmarked tasks as FALSE
+// and reload the page with the new date's tasks. Also checked when the tab becomes visible again.
+async function checkNewDay() {
+  if (!S.prof || !S.day || S.rolling) return;
+  const t = today();
+  if (t === S.day) return;
+  S.rolling = true;
+  try {
+    S.day = t;
+    clearCache();
+    await Promise.all([loadSettings(), loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
+    const n = await closePendingDays();
+    await autoMonthly().catch(() => {});
+    toast(`New day ${t} (${L.dayName(t)}) — today's tasks loaded${n ? `, ${n} unmarked task(s) of yesterday saved as FALSE` : ''}`, 'info');
+    route();
+  } catch (e) { console.warn('new day', e); } finally { S.rolling = false; }
+}
+setInterval(checkNewDay, 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNewDay(); });
+
 async function boot(user) {
   try {
     const p = await getDoc(doc(db, 'users', user.uid));
@@ -784,6 +881,7 @@ async function boot(user) {
     document.title = S.settings.APP_TITLE;
     try { const n = await closePendingDays(); if (n) toast(`${n} unmarked task(s) from previous days saved as FALSE`, 'secondary'); } catch (e) { console.warn('auto-close', e); }
     try { await autoMonthly(); } catch (e) { console.warn('monthly', e); }
+    S.day = today();
     route();
   } catch (e) { fail(e); renderLogin(friendly(e)); }
 }

@@ -368,13 +368,48 @@ export function parseOldWorkbook(getCell, maxRow, has) {
   return { tasks, records, users: [...names.values()], lastDate };
 }
 
+// Dropdown values — same lists as the old sheet's "Listings" tab, plus whatever is already used in tasks.
+export const SHEET_LISTS = {
+  depart: ['Accounts', 'Admin', 'HR', 'Inventory', 'IT', 'Online & Marketing', 'QA', 'Retail', 'Retail + WH', 'Warehouse'],
+  audit_type: ['Pre-Audit', 'Post-Audit'],
+  recurrence: ['Daily', 'Weekly', 'Fornightly', 'Monthly', 'Quarterly', 'Twice a Year', 'Yearly', 'Trigger'],
+  company: ['RC', 'RCG', 'Rc Gojra', 'RCG Fsd'],
+  days: ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+  dates: Array.from({ length: 31 }, (_, i) => String(i + 1)),
+  months: Array.from({ length: 12 }, (_, i) => String(i + 1)),
+};
+const uniqSorted = (a) => [...new Set(a.filter(Boolean))].sort((x, y) => String(x).toLowerCase().localeCompare(String(y).toLowerCase()));
+
 export function listings(tasks, userNames = []) {
-  const col = (k) => [...new Set(tasks.map((t) => t[k]).filter(Boolean))].sort();
+  const col = (k) => tasks.map((t) => t[k]).filter(Boolean);
   return {
-    depart: col('depart'), checklist: col('checklist'), task: col('task'), audit_type: col('audit_type'),
-    company: col('company'), branch: col('branch'),
-    user: [...new Set([...col('user'), ...userNames])].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
-    recurrence: [...new Set([...col('recurrence'), 'Daily', 'Weekly', 'Fornightly', 'Monthly', 'Quarterly', 'Twice a Year', 'Yearly', 'Trigger'])].sort(),
-    target: ['Daily', 'Triggered', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', ...Array.from({ length: 31 }, (_, i) => String(i + 1))],
+    depart: uniqSorted([...SHEET_LISTS.depart, ...col('depart')]),
+    checklist: uniqSorted(col('checklist')),
+    task: uniqSorted(col('task')),
+    audit_type: uniqSorted([...SHEET_LISTS.audit_type, ...col('audit_type')]),
+    company: uniqSorted([...SHEET_LISTS.company, ...col('company')]),
+    branch: uniqSorted(['RC', ...col('branch')]),
+    user: uniqSorted([...col('user'), ...userNames]),
+    recurrence: [...new Set([...SHEET_LISTS.recurrence, ...col('recurrence')])],
+    target: ['Daily', 'Triggered', ...SHEET_LISTS.days, ...SHEET_LISTS.dates],
   };
+}
+
+/** Target Day / Date choices that make sense for a Recurrence (column M depends on column L). */
+export function targetsFor(recurrence) {
+  const r = norm(recurrence);
+  if (r === 'daily') return ['Daily'];
+  if (r === 'weekly') return SHEET_LISTS.days;
+  if (r === 'trigger' || r === 'triggered') return ['Triggered'];
+  if (r === 'monthly' || r.startsWith('forn') || r.startsWith('fort')) return SHEET_LISTS.dates;
+  if (['quarterly', 'twice a year', 'yearly'].includes(r)) return SHEET_LISTS.dates;
+  return ['Daily', 'Triggered', ...SHEET_LISTS.days, ...SHEET_LISTS.dates];
+}
+export const needsMonth = (recurrence) => ['quarterly', 'twice a year', 'yearly'].includes(norm(recurrence));
+
+/** Next dates (yyyy-mm-dd) on which a task will be "Y", looking ahead `days` days. */
+export function nextDueDates(t, fromKey, opts, count = 5, days = 400) {
+  const out = [];
+  for (let i = 0, d = fromKey; i < days && out.length < count; i++, d = addDays(d, 1)) if (isScheduled(t, d, opts)) out.push(d);
+  return out;
 }
