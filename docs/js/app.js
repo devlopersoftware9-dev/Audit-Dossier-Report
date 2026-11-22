@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=7';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=7';
+import * as L from './logic.js?v=8';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=8';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -801,9 +801,11 @@ function renderSettings() {
     ${L.DEFAULT_SETTINGS.map(([k, , note]) => `<tr><td class="small fw-bold">${k}</td><td>${k === 'FINE_MODE' ? `<select name="${k}" class="form-select form-select-sm">${['NONE', 'PER_TASK', 'PERCENT', 'BOTH'].map((m) => `<option ${m === String(S.settings[k]).toUpperCase() ? 'selected' : ''}>${m}</option>`).join('')}</select>` : `<input name="${k}" value="${esc(S.settings[k])}" class="form-control form-control-sm">`}</td><td class="small muted">${esc(note)}</td></tr>`).join('')}
     </tbody></table><button class="btn btn-primary btn-sm">Save Settings</button></form></div>
     <div class="col-lg-4">
-      <div class="panel"><h6>Import from the old Google Sheet</h6><div class="small muted mb-2">In Google Sheets, go to File → Download → Microsoft Excel (.xlsx), then choose the file here. It reads Sort_List (tasks) and Officer_Master_DB (history). It also creates a login for every user name in column G (password <b>Audit@123</b>; they set their own at first login).<br>Tasks in database: <b>${S.tasks.length}</b>.</div>
-        <input type="file" id="xf" accept=".xlsx" class="form-control form-control-sm mb-2"><div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="rep"><label for="rep" class="form-check-label small">Replace ALL current tasks and records</label></div>
-        <button class="btn btn-outline-secondary btn-sm w-100" id="btnImp">Import</button><div class="progress-log mt-2 d-none" id="ilog"></div></div>
+      <div class="panel"><h6>Import / update from Google Sheet (.xlsx)</h6><div class="small muted mb-2">Google Sheets → File → Download → Microsoft Excel (.xlsx). The task sheet can have any name (Sort_List, Sheet1 …); it is found by its headers (<b>Check List</b>, <b>1st</b> …). Every name in column <b>1st (G)</b> gets a login — password <b>Audit@123</b>, changed at first login. History comes from <b>Officer_Master_DB</b>.<br>Tasks now in database: <b>${S.tasks.length}</b>.</div>
+        <input type="file" id="xf" accept=".xlsx" class="form-control form-control-sm mb-2">
+        <div class="form-check small"><input class="form-check-input" type="radio" name="imode" id="im1" value="tasks" checked><label class="form-check-label" for="im1"><b>Update tasks &amp; users</b> — replace the task list with the file, add new users and missing history. Saved history and today's ticks are kept.</label></div>
+        <div class="form-check small mb-2"><input class="form-check-input" type="radio" name="imode" id="im2" value="all"><label class="form-check-label" for="im2"><b>Replace everything</b> — delete all tasks AND all saved TRUE/FALSE history, then load the file.</label></div>
+        <button class="btn btn-primary btn-sm w-100" id="btnImp">Import</button><div class="progress-log mt-2 d-none" id="ilog"></div></div>
       <div class="panel"><h6>Close a past day</h6><div class="small muted mb-2">Saves FALSE for every task due on that date that has no TRUE / FALSE. This also happens automatically every day.</div>
         <input type="date" id="cd" class="form-control form-control-sm mb-2"><button class="btn btn-outline-danger btn-sm w-100" id="btnClose">Close this date</button></div>
       <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div></div></div>`);
@@ -837,59 +839,81 @@ function renderSettings() {
       XLSX.writeFile(wb, `audit_backup_${today()}.xlsx`);
     } catch (e) { fail(e); }
   };
-  $('btnImp').onclick = () => importWorkbook($('xf').files[0], $('rep').checked);
+  $('btnImp').onclick = () => importWorkbook($('xf').files[0], document.querySelector('input[name=imode]:checked').value);
 }
 
-async function importWorkbook(file, replace) {
+async function importWorkbook(file, mode = 'tasks') {
   const lg = $('ilog'), btn = $('btnImp');      // kept even if the user opens another page meanwhile
   const say = (m) => { lg.classList.remove('d-none'); lg.textContent += m + '\n'; lg.scrollTop = lg.scrollHeight; };
   if (!file) return toast('Choose the .xlsx file first', 'warning');
-  if (!confirm('Import now? Please stay on this page until it says "Done".')) return;
+  const all = mode === 'all';
+  if (!confirm(all ? 'REPLACE EVERYTHING: all tasks and all saved TRUE/FALSE history will be deleted and loaded again from the file. Continue?'
+    : 'Update the task list and users from this file? Saved history and today\'s ticks are kept. Please stay on this page until it says "Done".')) return;
   btn.disabled = true;
   try {
-    if (S.tasks.length && !replace) throw new Error(`Database already has ${S.tasks.length} task rows. Tick "Replace" to import again.`);
     say('Reading file…');
     const wb = XLSX.read(await file.arrayBuffer(), { cellDates: false });
     const res = L.parseOldWorkbook(
       (s, r, c) => wb.Sheets[s][XLSX.utils.encode_cell({ r: r - 1, c: c - 1 })],
       (s) => (wb.Sheets[s]['!ref'] ? XLSX.utils.decode_range(wb.Sheets[s]['!ref']).e.r + 1 : 0),
-      (s) => !!wb.Sheets[s]);
-    say(`Found ${res.tasks.length} task rows, ${res.records.length} history records, users: ${res.users.join(', ')}`);
-    if (replace) {
-      for (const name of ['tasks', 'records']) {
-        const snap = await getDocs(collection(db, name));
-        for (let i = 0; i < snap.docs.length; i += 450) {
-          const b = writeBatch(db); snap.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref)); await b.commit();
-        }
-        say(`Cleared ${snap.size} ${name}`);
-      }
+      (s) => !!wb.Sheets[s], wb.SheetNames);
+    const per = {};
+    res.tasks.forEach((t) => { per[t.user] = (per[t.user] || 0) + 1; });
+    say(`Sheet "${res.sheet}": ${res.tasks.length} task rows (${Object.entries(per).map(([u, n]) => `${u} ${n}`).join(', ')}), ${res.records.length} history records`);
+    if (!res.tasks.length) throw new Error('No task rows found in the file.');
+    const kept = L.carryLinks(res.tasks, S.tasks);
+    if (kept) say(`Kept ${kept} SOP / check-list link(s) from the current tasks`);
+
+    // tasks: always replaced by the file
+    const oldTasks = await getDocs(collection(db, 'tasks'));
+    for (let i = 0; i < oldTasks.docs.length; i += 450) {
+      const b = writeBatch(db); oldTasks.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref)); await b.commit();
     }
     for (let i = 0; i < res.tasks.length; i += 450) {
       const b = writeBatch(db);
       res.tasks.slice(i, i + 450).forEach((t) => b.set(doc(collection(db, 'tasks')), t));
       await b.commit();
     }
-    say(`Saved ${res.tasks.length} task rows`);
-    for (let i = 0; i < res.records.length; i += 450) {
-      const b = writeBatch(db);
-      for (const r of res.records.slice(i, i + 450)) b.set(doc(db, 'records', await recordId(r)), r);
-      await b.commit();
-      say(`Saved records ${Math.min(i + 450, res.records.length)} / ${res.records.length}`);
+    say(`Task list: ${oldTasks.size} old rows replaced by ${res.tasks.length}`);
+
+    // history
+    let existing = new Set();
+    if (all) {
+      const snap = await getDocs(collection(db, 'records'));
+      for (let i = 0; i < snap.docs.length; i += 450) {
+        const b = writeBatch(db); snap.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref)); await b.commit();
+      }
+      say(`Deleted ${snap.size} saved records`);
+    } else {
+      existing = new Set((await getDocs(collection(db, 'records'))).docs.map((d) => d.id));
     }
+    const toAdd = [];
+    for (const r of res.records) { const id = await recordId(r); if (!existing.has(id)) toAdd.push([id, r]); }
+    for (let i = 0; i < toAdd.length; i += 450) {
+      const b = writeBatch(db);
+      toAdd.slice(i, i + 450).forEach(([id, r]) => b.set(doc(db, 'records', id), r));
+      await b.commit();
+    }
+    say(`History: ${toAdd.length} record(s) added${all ? '' : `, ${res.records.length - toAdd.length} already there (kept as they are)`}`);
+
+    // users from column 1st (G)
     await loadUsers();
     const yest = L.addDays(today(), -1);
-    const closed = yest;   // tracking starts from the import day (days after the export are unknown)
     for (const name of res.users) {
       const u = S.users.find((x) => x.username_lc === L.norm(name) && !x.replaced_by);
-      if (u) { await updateDoc(doc(db, 'users', u.uid), { closed_until: closed }); say(`User ${name} already has a login`); continue; }
-      await createLogin(name, 'Audit@123', { role: 'Officer', closed_until: closed, must_change: true });
-      say(`Login created: ${name} / Audit@123 (must change at first login)`);
+      if (u) {
+        if (!u.active) await updateDoc(doc(db, 'users', u.uid), { active: true });
+        say(`User "${name}" already has a login`);
+        continue;
+      }
+      await createLogin(name, 'Audit@123', { role: 'Officer', closed_until: yest, must_change: true });
+      say(`Login created: "${name}" / Audit@123 (must change at first login)`);
     }
     await Promise.all([loadTasks(), loadUsers()]);
     clearCache();
-    log('IMPORT', `${res.tasks.length} tasks, ${res.records.length} records`);
+    log('IMPORT', `${mode}: ${res.tasks.length} tasks, +${toAdd.length} records, users ${res.users.join(', ')}`);
     say('Done ✔');
-    toast(`Import finished: ${res.tasks.length} tasks, ${res.records.length} records`);
+    toast(`Import finished: ${res.tasks.length} tasks, users: ${res.users.join(', ')}`);
     route();                                       // refresh whatever page is open now
   } catch (e) { say('ERROR: ' + friendly(e)); fail(e); } finally { btn.disabled = false; }
 }

@@ -318,24 +318,62 @@ export function cellText(c) {
  * Parse the old sheet. getCell(sheetName, row1, col1) -> SheetJS cell or undefined. maxRow(sheetName) -> number.
  * Returns { tasks, records, users, lastDate }.
  */
-export function parseOldWorkbook(getCell, maxRow, has) {
-  if (!has('Sort_List')) throw new Error('Sheet "Sort_List" not found in the file.');
+// Header names of the tasks sheet -> task fields (first match wins; "Check List" appears twice in the sheet).
+const TASK_HEADERS = {
+  'depart': 'depart', 'department': 'depart', 'check list': 'checklist', 'checklist': 'checklist',
+  'check list detail': 'detail', 'task': 'task', '1st': 'user', 'user': 'user',
+  'triggered /daily work': 'audit_type', 'triggered / daily work': 'audit_type', 'recurrence': 'recurrence',
+  'target day / date': 'target', 'target month': 'target_month', 'company': 'company', 'branch name': 'branch',
+  'branch': 'branch', 'starttime': 'start_time', 'start time': 'start_time', 'endtime': 'end_time', 'end time': 'end_time',
+  'remarks': 'remarks', 'ordered by': 'ordered_by', 'sop': 'sop', 'hide (y)': 'hide', 'hide': 'hide',
+};
+const DEFAULT_COLS = { depart: 3, checklist: 4, detail: 5, task: 6, user: 7, audit_type: 11, recurrence: 12, target: 13,
+  target_month: 14, company: 15, branch: 16, start_time: 17, end_time: 18, remarks: 21, ordered_by: 22, sop: 26, hide: 29 };
+
+/** Find the tasks sheet (any name) and its header row: the row that has "Check List" and "1st". */
+export function findTaskSheet(getCell, maxRow, sheetNames) {
+  const order = [...sheetNames].sort((a, b) => (a === 'Sort_List' ? -1 : b === 'Sort_List' ? 1 : 0));
+  for (const sh of order) {
+    if (sh === 'Officer_Master_DB' || sh === 'Listings') continue;
+    for (let r = 1; r <= Math.min(15, maxRow(sh)); r++) {
+      const cols = {};
+      for (let c = 1; c <= 40; c++) {
+        const h = norm(cellText(getCell(sh, r, c))).replace(/\s+/g, ' ');
+        const f = TASK_HEADERS[h];
+        if (f && !cols[f]) cols[f] = c;
+      }
+      if (cols.checklist && cols.user) return { sheet: sh, headerRow: r, cols: { ...DEFAULT_COLS, ...cols } };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse the old sheet (or a copy of it with another sheet name / header row).
+ * getCell(sheetName, row1, col1) -> SheetJS cell or undefined. maxRow(sheetName) -> number. has(name) -> bool.
+ * Returns { tasks, records, users, lastDate, sheet }.
+ */
+export function parseOldWorkbook(getCell, maxRow, has, sheetNames = ['Sort_List']) {
+  const found = findTaskSheet(getCell, maxRow, sheetNames);
+  if (!found) throw new Error('No task sheet found: the file needs a sheet with the headers "Check List" and "1st".');
+  const { sheet, headerRow, cols } = found;
   const tasks = [], names = new Map(), branchOf = new Map();
-  for (let r = 7; r <= maxRow('Sort_List'); r++) {
-    const c = (col) => getCell('Sort_List', r, col);
-    const checklist = cellText(c(4));
+  for (let r = headerRow + 1; r <= maxRow(sheet); r++) {
+    const c = (f) => getCell(sheet, r, cols[f]);
+    const checklist = cellText(c('checklist'));
     if (!checklist) continue;
-    const user = cellText(c(7)) || 'Unassigned';
+    const user = cellText(c('user')) || 'Unassigned';
     if (!names.has(norm(user))) names.set(norm(user), user);
-    const time = (col) => { const x = c(col); if (!x || x.v == null || x.v === '') return ''; return x.t === 'n' ? serialToTime(x.v) : cellText(x); };
+    const time = (f) => { const x = c(f); if (!x || x.v == null || x.v === '') return ''; return x.t === 'n' ? serialToTime(x.v) : cellText(x); };
     const link = (x) => (x && x.l && x.l.Target) || '';
-    let sopName = cellText(c(26)); let sopUrl = link(c(26));
+    let sopName = cellText(c('sop')); let sopUrl = link(c('sop'));
     if (/^https?:/i.test(sopName) && !sopUrl) sopUrl = sopName;
-    const t = { depart: cellText(c(3)), checklist, checklist_url: link(c(4)), detail: cellText(c(5)), task: cellText(c(6)),
-      user, user_lc: norm(user), audit_type: cellText(c(11)), recurrence: cellText(c(12)), target: cellText(c(13)),
-      target_month: cellText(c(14)), company: cellText(c(15)), branch: cellText(c(16)), start_time: time(17), end_time: time(18),
-      sop_name: sopName, sop_url: sopUrl, remarks: cellText(c(21)), ordered_by: cellText(c(22)),
-      hidden: ['y', 'yes', 'true', '1'].includes(norm(cellText(c(29)))), sort_order: r, created_at: '', created_by: 'import' };
+    const t = { depart: cellText(c('depart')), checklist, checklist_url: link(c('checklist')), detail: cellText(c('detail')), task: cellText(c('task')),
+      user, user_lc: norm(user), audit_type: cellText(c('audit_type')), recurrence: cellText(c('recurrence')), target: cellText(c('target')),
+      target_month: cellText(c('target_month')), company: cellText(c('company')), branch: cellText(c('branch')),
+      start_time: time('start_time'), end_time: time('end_time'), sop_name: sopName, sop_url: sopUrl,
+      remarks: cellText(c('remarks')), ordered_by: cellText(c('ordered_by')),
+      hidden: ['y', 'yes', 'true', '1'].includes(norm(cellText(c('hide')))), sort_order: r, created_at: '', created_by: 'import' };
     tasks.push(t);
     const bk = [norm(t.depart), norm(checklist), norm(t.task)].join('|');
     if (!branchOf.has(bk)) branchOf.set(bk, t.branch);
@@ -366,7 +404,7 @@ export function parseOldWorkbook(getCell, maxRow, has) {
       if (d > lastDate) lastDate = d;
     }
   }
-  return { tasks, records, users: [...names.values()], lastDate };
+  return { tasks, records, users: [...names.values()], lastDate, sheet };
 }
 
 // Dropdown values — same lists as the old sheet's "Listings" tab, plus whatever is already used in tasks.
@@ -380,6 +418,22 @@ export const SHEET_LISTS = {
   months: Array.from({ length: 12 }, (_, i) => String(i + 1)),
 };
 const uniqSorted = (a) => [...new Set(a.filter(Boolean))].sort((x, y) => String(x).toLowerCase().localeCompare(String(y).toLowerCase()));
+
+/** Keep SOP / check-list links that a newer file lost (match by SOP name, then by department + check list). */
+export function carryLinks(newTasks, oldTasks) {
+  const sop = new Map(), cl = new Map();
+  for (const t of oldTasks) {
+    if (t.sop_url && t.sop_name) sop.set(norm(t.sop_name), t.sop_url);
+    if (t.checklist_url) cl.set(norm(t.depart) + '|' + norm(t.checklist), t.checklist_url);
+  }
+  let n = 0;
+  for (const t of newTasks) {
+    if (!t.sop_url && t.sop_name && sop.has(norm(t.sop_name))) { t.sop_url = sop.get(norm(t.sop_name)); n++; }
+    const k = norm(t.depart) + '|' + norm(t.checklist);
+    if (!t.checklist_url && cl.has(k)) { t.checklist_url = cl.get(k); n++; }
+  }
+  return n;
+}
 
 export function listings(tasks, userNames = []) {
   const col = (k) => tasks.map((t) => t[k]).filter(Boolean);
