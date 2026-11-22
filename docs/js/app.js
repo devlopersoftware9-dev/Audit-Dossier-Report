@@ -15,7 +15,7 @@ const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
 
 // ------------------------------------------------------------------ state & helpers
-const S = { settingUp: false, prof: null, uid: null, isAdmin: false, settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
+const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => Math.round(Number(v) || 0).toLocaleString('en-PK');
@@ -170,6 +170,7 @@ function shell(active, inner) {
     <div id="main">${inner}</div></div>`;
 }
 function mount(active, inner) {
+  S.seq++;
   $('app').innerHTML = shell(active, inner);
   $('btnLogout').onclick = () => signOut(auth);
 }
@@ -244,6 +245,7 @@ function renderSetup() {
 // ------------------------------------------------------------------ tasks portal
 async function renderTasks(q) {
   mount('tasks', loading);
+  const my = S.seq;
   const tab = q.tab || 'today', val = q.v || '';
   const viewLc = S.isAdmin ? L.norm(q.user || '') : S.prof.username_lc;
   const t = today();
@@ -259,6 +261,7 @@ async function renderTasks(q) {
     const e = L.efficiency(recs, { start: t.slice(0, 8) + '01', end: L.addDays(t, -1), group_by: 'user' }, S.settings, salaries());
     if (e.totals.total) { mtd = e.totals.pct + '%'; fine = money(e.totals.total_fine); }
   }
+  if (my !== S.seq) return;            // user already moved to another page
   const { depts, branches } = L.tabs(S.groups, S.settings, S.isAdmin ? null : S.prof.username);
   const qs = S.isAdmin && q.user ? { user: q.user } : {};
   const pill = (k, v, label, cls) => `<a class="btn btn-sm ${tab === k && val === v ? 'btn-' + cls + (cls === 'info' ? ' text-white' : '') : 'btn-outline-' + cls}" href="${link('tasks', { tab: k === 'today' ? '' : k, v, ...qs })}">${esc(label)}</a>`;
@@ -360,7 +363,9 @@ async function renderReport(q) {
   $('btnExp').onclick = () => exportXlsx(`Report_${f.start}_to_${f.end}`, ['Date', 'User', 'Company', 'Branch', 'Department', 'Check List', 'To-Do', 'Task Type', 'Status', 'Remarks', 'Timestamp', 'Source'],
     rows.map((r) => [r.date, r.user, r.company, r.branch, r.department, r.checklist, r.todo, r.task_type, r.status ? 'TRUE' : 'FALSE', r.remarks, r.timestamp, r.source]));
   if (!q.start) return;
+  const my = S.seq;
   const recs = await fetchRecords(f.start, f.end, S.isAdmin ? L.norm(f.user) : null, true);
+  if (my !== S.seq) return;
   rows = L.filterRecords(recs, f, S.isAdmin ? null : S.prof.username).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.user.localeCompare(b.user)));
   const tr = rows.filter((r) => r.status).length;
   $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Records: ${rows.length}</span> <span class="badge bg-success">TRUE: ${tr}</span> <span class="badge bg-danger">FALSE: ${rows.length - tr}</span>
@@ -393,7 +398,9 @@ async function renderEff(q) {
     <div class="small muted mt-1">Efficiency % = TRUE ÷ (TRUE + FALSE). Unmarked tasks are saved as FALSE automatically the next day. Tasks ticked on a day they were not due ("Extra") are not counted.</div></form>
     <div class="panel" id="out">${loading}</div>`);
   $('ef').onsubmit = (ev) => { ev.preventDefault(); go('eff', readForm(ev.target)); };
+  const my = S.seq;
   const recs = await fetchRecords(f.start, f.end, S.isAdmin ? L.norm(f.user) : null);
+  if (my !== S.seq) return;
   const d = L.efficiency(recs, f, S.settings, salaries(), S.isAdmin ? null : S.prof.username);
   $('btnExp').onclick = () => exportXlsx(`Efficiency_${f.start}_to_${f.end}`, [d.group_by, 'Scheduled', 'Done (TRUE)', 'Missed (FALSE)', 'Efficiency %', 'Grade', 'Per-task Fine', 'Salary', 'Deduct %', '% Fine', 'Total Fine'],
     d.rows.map((r) => [r.key, r.total, r.done, r.missed, r.pct, r.grade, r.task_fine, r.salary, r.deduct_pct, r.pct_fine, r.total_fine]));
@@ -414,9 +421,11 @@ async function renderMonthly(q) {
     <div class="panel"><div class="table-wrap" id="out">${loading}</div></div>`);
   $('mf').onsubmit = (ev) => { ev.preventDefault(); go('monthly', readForm(ev.target)); };
   const { start, end } = L.monthBounds(ym);
+  const my = S.seq;
   const recs = await fetchRecords(start, end, viewLc || null);
   const m = L.monthly(recs, ym, S.settings, salaries(), viewLc ? (S.users.find((u) => u.username_lc === viewLc)?.username || S.prof.username) : null);
   const snap = await getDoc(doc(db, 'monthly', ym)).catch(() => null);
+  if (my !== S.seq) return;
   $('mInfo').innerHTML = `Fine mode: <b>${esc(m.mode)}</b> · ${snap && snap.exists() ? 'Month-end snapshot saved on ' + esc(snap.data().generated_at) : 'Snapshot saves automatically on the 1st of next month'}`;
   if ($('btnSave')) $('btnSave').onclick = async () => {
     if (!confirm(`Save / overwrite the month-end snapshot of ${ym}?`)) return;
@@ -661,10 +670,11 @@ function renderSettings() {
 }
 
 async function importWorkbook(file, replace) {
-  const lg = $('ilog');
+  const lg = $('ilog'), btn = $('btnImp');      // kept even if the user opens another page meanwhile
   const say = (m) => { lg.classList.remove('d-none'); lg.textContent += m + '\n'; lg.scrollTop = lg.scrollHeight; };
   if (!file) return toast('Choose the .xlsx file first', 'warning');
-  $('btnImp').disabled = true;
+  if (!confirm('Import now? Please stay on this page until it says "Done".')) return;
+  btn.disabled = true;
   try {
     if (S.tasks.length && !replace) throw new Error(`Database already has ${S.tasks.length} task rows. Tick "Replace" to import again.`);
     say('Reading file…');
@@ -708,8 +718,9 @@ async function importWorkbook(file, replace) {
     clearCache();
     log('IMPORT', `${res.tasks.length} tasks, ${res.records.length} records`);
     say('Done ✔');
-    toast('Import finished');
-  } catch (e) { say('ERROR: ' + friendly(e)); fail(e); } finally { $('btnImp').disabled = false; }
+    toast(`Import finished: ${res.tasks.length} tasks, ${res.records.length} records`);
+    route();                                       // refresh whatever page is open now
+  } catch (e) { say('ERROR: ' + friendly(e)); fail(e); } finally { btn.disabled = false; }
 }
 
 // ------------------------------------------------------------------ password
