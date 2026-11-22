@@ -569,7 +569,8 @@ function renderTaskForm(q) {
   // Target Day/Date list follows Recurrence (Daily / Mon-Sun / 1-31 / Triggered), like the sheet
   const fillTargets = (keep) => {
     const opts = L.targetsFor(val('recurrence'));
-    const cur = keep ?? $('tgt').value;
+    // first load keeps the saved value; after a Recurrence change only a value that fits the new list is kept
+    const cur = keep ?? (opts.includes($('tgt').value) ? $('tgt').value : '');
     const list = [...new Set([...opts, ...(cur && !opts.includes(cur) ? [cur] : [])])];
     $('tgt').innerHTML = `<option value="">— select —</option>` + list.map((o) => `<option ${o === cur ? 'selected' : ''}>${o}</option>`).join('');
     if (list.length === 1 && !cur) $('tgt').value = list[0];
