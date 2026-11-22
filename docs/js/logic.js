@@ -310,6 +310,8 @@ export function serialToStamp(v) {
 }
 export function cellText(c) {
   if (!c || c.v == null) return '';
+  if (c.t === 'e') return '';                                   // Excel error cells (#REF!, #N/A …) count as blank
+  if (typeof c.v === 'string' && /^#(REF!|N\/A|VALUE!|NAME\?|DIV\/0!|NUM!|NULL!|ERROR!)$/i.test(c.v.trim())) return '';
   if (c.t === 'n' && Number.isInteger(c.v)) return String(c.v);
   return String(c.v).trim();
 }

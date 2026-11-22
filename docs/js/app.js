@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=8';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=8';
+import * as L from './logic.js?v=9';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=9';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -38,6 +38,25 @@ function showModal(title, html) {
   $('detailTitle').textContent = title;
   $('detailBody').innerHTML = html;
   bootstrap.Modal.getOrCreateInstance($('detailModal')).show();
+}
+/** In-page Yes/No dialog (some browsers, e.g. the one inside the Claude app, block window.confirm). */
+function askConfirm(message, okLabel = 'OK') {
+  return new Promise((resolve) => {
+    let box = $('askModal');
+    if (!box) {
+      document.body.insertAdjacentHTML('beforeend', `<div class="modal fade" id="askModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-body" id="askText"></div><div class="modal-footer"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="askOk">OK</button></div></div></div></div>`);
+      box = $('askModal');
+    }
+    $('askText').textContent = message;
+    $('askOk').textContent = okLabel;
+    const m = bootstrap.Modal.getOrCreateInstance(box);
+    let answered = false;
+    $('askOk').onclick = () => { answered = true; m.hide(); resolve(true); };
+    box.addEventListener('hidden.bs.modal', () => { if (!answered) resolve(false); }, { once: true });
+    m.show();
+  });
 }
 function fail(e) { console.error(e); toast(friendly(e), 'danger'); }
 function friendly(e) {
@@ -528,7 +547,7 @@ async function renderMonthly(q) {
   if (my !== S.seq) return;
   $('mInfo').innerHTML = `Fine mode: <b>${esc(m.mode)}</b> · ${snap && snap.exists() ? 'Month-end snapshot saved on ' + esc(snap.data().generated_at) : 'Snapshot saves automatically on the 1st of next month'}`;
   if ($('btnSave')) $('btnSave').onclick = async () => {
-    if (!confirm(`Save / overwrite the month-end snapshot of ${ym}?`)) return;
+    if (!await askConfirm(`Save / overwrite the month-end snapshot of ${ym}?`)) return;
     try { const all = await fetchRecords(start, end, null, true); const n = await saveMonthly(ym, all); log('SAVE_MONTHLY', ym); toast(`Saved ${n} users`); renderMonthly(q); } catch (e) { fail(e); }
   };
   $('btnExp').onclick = () => {
@@ -592,7 +611,7 @@ function renderAdminTasks(q) {
       const ids = [...document.querySelectorAll('.sel:checked')].map((c) => c.value);
       if (!ids.length) return toast('Select task rows first', 'warning');
       const act = b.dataset.act;
-      if (act === 'delete' && !confirm(`Delete ${ids.length} task row(s) permanently? (Saved TRUE/FALSE history stays.)`)) return;
+      if (act === 'delete' && !await askConfirm(`Delete ${ids.length} task row(s) permanently? (Saved TRUE/FALSE history stays.)`)) return;
       try {
         const bt = writeBatch(db);
         ids.forEach((id) => (act === 'delete' ? bt.delete(doc(db, 'tasks', id)) : bt.update(doc(db, 'tasks', id), { hidden: act === 'hide' })));
@@ -817,7 +836,7 @@ function renderSettings() {
     const d = $('cd').value;
     if (!d) return toast('Pick a date', 'warning');
     if (d >= today()) return toast('Only past dates can be closed.', 'warning');
-    if (!confirm(`Save FALSE for unmarked tasks of ${d}?`)) return;
+    if (!await askConfirm(`Save FALSE for unmarked tasks of ${d}?`)) return;
     try {
       const recs = await fetchRecords(d, d, null, true);
       const active = new Set(S.users.filter((u) => u.active && u.role !== 'Admin').map((u) => u.username_lc));
@@ -847,7 +866,7 @@ async function importWorkbook(file, mode = 'tasks') {
   const say = (m) => { lg.classList.remove('d-none'); lg.textContent += m + '\n'; lg.scrollTop = lg.scrollHeight; };
   if (!file) return toast('Choose the .xlsx file first', 'warning');
   const all = mode === 'all';
-  if (!confirm(all ? 'REPLACE EVERYTHING: all tasks and all saved TRUE/FALSE history will be deleted and loaded again from the file. Continue?'
+  if (!await askConfirm(all ? 'REPLACE EVERYTHING: all tasks and all saved TRUE/FALSE history will be deleted and loaded again from the file. Continue?'
     : 'Update the task list and users from this file? Saved history and today\'s ticks are kept. Please stay on this page until it says "Done".')) return;
   btn.disabled = true;
   try {
