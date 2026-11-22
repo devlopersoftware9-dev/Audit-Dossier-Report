@@ -130,7 +130,41 @@ export function buildGroups(tasks, includeHidden = false) {
     const c = (t.created_at || '').slice(0, 10);
     g.since = (!c || !g.since) ? '' : (c < g.since ? c : g.since);
   }
+  // Same check list = same SOP in every company (RC, RCG …): fill missing SOP / links from the other teams
+  const share = new Map();
+  for (const t of list) {
+    const k = norm(t.depart) + '|' + norm(t.checklist);
+    const x = share.get(k) || {};
+    if (t.sop_url && !x.sop_url) { x.sop_url = t.sop_url; x.sop_name = t.sop_name || x.sop_name; }
+    if (t.sop_name && !x.sop_name) x.sop_name = t.sop_name;
+    if (t.checklist_url && !x.checklist_url) x.checklist_url = t.checklist_url;
+    share.set(k, x);
+  }
+  for (const g of map.values()) {
+    const x = share.get(norm(g.depart) + '|' + norm(g.checklist)) || {};
+    if (!g.sop_name && x.sop_name) g.sop_name = x.sop_name;
+    if (!g.sop_url && x.sop_url) g.sop_url = x.sop_url;
+    if (!g.checklist_url && x.checklist_url) g.checklist_url = x.checklist_url;
+  }
   return [...map.values()];
+}
+
+/** Records that exist twice for the same day / user / check list / task (keeps the one with a known branch). */
+export function findDuplicateRecords(recs, knownBranches) {
+  const known = new Set([...knownBranches].map(norm));
+  const by = new Map();
+  for (const r of recs) {
+    const k = [r.date, r.user, r.department, r.checklist, r.task_type].map(norm).join('|');
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(r);
+  }
+  const extra = [];
+  for (const list of by.values()) {
+    if (list.length < 2) continue;
+    const keep = list.find((r) => known.has(norm(r.branch))) || list[0];
+    list.forEach((r) => { if (r !== keep && !known.has(norm(r.branch))) extra.push(r); });
+  }
+  return extra;
 }
 export const sortGroups = (l) => [...l].sort((a, b) => (BUCKET_ORDER[a.bucket] || 9) - (BUCKET_ORDER[b.bucket] || 9));
 

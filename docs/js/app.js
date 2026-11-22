@@ -5,10 +5,10 @@ import {
   updatePassword, EmailAuthProvider, reauthenticateWithCredential,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
+  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=9';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=9';
+import * as L from './logic.js?v=10';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=10';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -667,6 +667,7 @@ function renderTaskForm(q) {
       ${field('sop_name', 'SOP name', 4, 'text', false, 'e.g. Bilty receiving (WH / Receipt room)')}${field('sop_url', 'SOP link', 4, 'text', false, 'https://docs.google.com/…')}${field('checklist_url', 'Check list document link', 4, 'text', false, 'optional')}
       ${field('ordered_by', 'Ordered By', 4)}${field('remarks', 'Remarks', 8)}
     </div>
+    <div class="form-check mt-2"><input class="form-check-input" type="checkbox" name="sop_all" id="sopAll" checked><label class="form-check-label small" for="sopAll">Use this SOP / link for the same check list in <b>every company</b> (RC, RCG … — same SOP, different team)</label></div>
     <div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="hidden" id="hid" ${t.hidden ? 'checked' : ''}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>
     <div id="terr" class="text-danger small mt-2"></div>
     <div class="d-flex gap-2 mt-3"><button class="btn btn-primary btn-sm px-4" name="go" value="save">Save</button>${edit ? '' : '<button class="btn btn-outline-primary btn-sm" name="go" value="again">Save &amp; add another point</button>'}<a class="btn btn-secondary btn-sm" href="#/admin/tasks">Cancel</a></div></form>
@@ -732,6 +733,14 @@ function renderTaskForm(q) {
         id = ref.id;
         log('ADD_TASK', `${id} ${c.checklist}`);
       }
+      if (data.sop_all && (c.sop_name || c.sop_url || c.checklist_url)) {
+        const same = S.tasks.filter((x) => x.id !== id && L.norm(x.depart) === L.norm(c.depart) && L.norm(x.checklist) === L.norm(c.checklist));
+        for (let i = 0; i < same.length; i += 400) {
+          const b = writeBatch(db);
+          same.slice(i, i + 400).forEach((x) => b.update(doc(db, 'tasks', x.id), { sop_name: c.sop_name, sop_url: c.sop_url, checklist_url: c.checklist_url }));
+          await b.commit();
+        }
+      }
       await loadTasks();
       toast('Task saved');
       if (again) { location.hash = '#/admin/task?copy=' + id + '&n=' + Date.now(); } else go('admin/tasks');
@@ -763,6 +772,37 @@ async function createLogin(username, password, extra = {}) {
   } finally { await deleteApp(tmp); }
 }
 
+/** Rename a user everywhere: login name, tasks (column 1st), saved history, today's ticks. */
+async function renameUser(u, newName) {
+  const oldLc = u.username_lc, newLc = L.norm(newName);
+  if (newLc !== oldLc) {
+    const taken = await getDoc(doc(db, 'usernames', newLc));
+    if (taken.exists()) throw new Error(`The name "${newName}" is already used by another login.`);
+  }
+  const map = await getDoc(doc(db, 'usernames', oldLc));
+  const upd = async (col) => {
+    const snap = await getDocs(query(collection(db, col), where('user_lc', '==', oldLc)));
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const b = writeBatch(db);
+      snap.docs.slice(i, i + 400).forEach((d) => b.update(d.ref, { user: newName, user_lc: newLc }));
+      await b.commit();
+    }
+    return snap.size;
+  };
+  const tasks = await upd('tasks');
+  const records = await upd('records');
+  await upd('marks');
+  await updateDoc(doc(db, 'users', u.uid), { username: newName, username_lc: newLc });
+  if (newLc !== oldLc) {
+    await setDoc(doc(db, 'usernames', newLc), map.exists() ? map.data() : { email: u.email, uid: u.uid, n: 0 });
+    await deleteDoc(doc(db, 'usernames', oldLc));
+  }
+  log('RENAME_USER', `${u.username} -> ${newName}`);
+  await Promise.all([loadTasks(), loadUsers()]);
+  clearCache();
+  return { tasks, records };
+}
+
 async function renderUsers() {
   await loadUsers();
   const known = new Set(S.users.map((u) => u.username_lc));
@@ -775,19 +815,19 @@ async function renderUsers() {
     ${live.map((u, i) => `<tr class="${u.active ? '' : 'hidden-row'}"><td><b>${esc(u.username)}</b></td><td>${esc(u.role)}</td><td>${money(u.salary)}</td><td>${u.active ? 'Y' : 'N'}</td><td>${cnt(u.username_lc)}</td><td class="small">${esc(u.last_login || '')}</td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Edit</button></td></tr>`).join('')}
     </tbody></table></div></div></div>
     <div class="col-lg-4"><form class="panel" id="uf"><h6 id="ufT">Add User</h6>
-      <label class="form-label small fw-bold">Username (same name used in tasks)</label><input name="username" class="form-control form-control-sm mb-2" required>
+      <label class="form-label small fw-bold">Username (same name used in tasks — can be renamed)</label><input name="username" class="form-control form-control-sm mb-2" required>
       <label class="form-label small fw-bold">Role</label><select name="role" class="form-select form-select-sm mb-2"><option>Officer</option><option>Admin</option></select>
       <label class="form-label small fw-bold">Monthly Salary (for % fine)</label><input name="salary" type="number" min="0" class="form-control form-control-sm mb-2">
       <label class="form-label small fw-bold">Password <span class="muted" id="pwHint">(min 6 — user changes it at first login)</span></label><input name="password" class="form-control form-control-sm mb-2" minlength="6">
       <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="active" id="ufA" checked><label for="ufA" class="form-check-label">Active</label></div>
       <button class="btn btn-primary btn-sm">Save User</button> <button type="button" class="btn btn-outline-secondary btn-sm" id="ufNew">New</button>
       <div id="uerr" class="text-danger small mt-2"></div></form></div></div>`);
-  let editing = null;
+  let editing = null;   // eslint-disable-line prefer-const
   const f = $('uf');
   $('main').onclick = (ev) => {
     const b = ev.target.closest('[data-i]'); if (!b) return;
     editing = live[+b.dataset.i];
-    f.username.value = editing.username; f.username.readOnly = true; f.role.value = editing.role; f.salary.value = editing.salary || 0; f.active.checked = !!editing.active; f.password.value = '';
+    f.username.value = editing.username; f.username.readOnly = false; f.role.value = editing.role; f.salary.value = editing.salary || 0; f.active.checked = !!editing.active; f.password.value = '';
     $('ufT').textContent = 'Edit ' + editing.username; $('pwHint').textContent = '(blank = keep; filled = reset password)';
   };
   $('ufNew').onclick = () => renderUsers();
@@ -797,6 +837,14 @@ async function renderUsers() {
     try {
       if (editing) {
         if (editing.uid === S.uid && (v.role !== 'Admin' || !v.active)) throw new Error('You cannot remove your own Admin access.');
+        const newName = String(v.username || '').trim();
+        if (!newName) throw new Error('Username is required.');
+        if (newName !== editing.username) {
+          if (!(await askConfirm(`Rename "${editing.username}" to "${newName}"? The new name is used for login, all tasks and all saved history.`, 'Rename'))) return;
+          const n = await renameUser(editing, newName);
+          toast(`Renamed to ${newName}: ${n.tasks} task(s), ${n.records} history record(s) updated`);
+          editing = { ...editing, username: newName, username_lc: L.norm(newName) };
+        }
         await updateDoc(doc(db, 'users', editing.uid), { role: v.role, salary: Number(v.salary) || 0, active: !!v.active });
         if (v.password) await createLogin(editing.username, v.password, { must_change: true });
         log('SAVE_USER', editing.username);
@@ -827,6 +875,8 @@ function renderSettings() {
         <button class="btn btn-primary btn-sm w-100" id="btnImp">Import</button><div class="progress-log mt-2 d-none" id="ilog"></div></div>
       <div class="panel"><h6>Close a past day</h6><div class="small muted mb-2">Saves FALSE for every task due on that date that has no TRUE / FALSE. This also happens automatically every day.</div>
         <input type="date" id="cd" class="form-control form-control-sm mb-2"><button class="btn btn-outline-danger btn-sm w-100" id="btnClose">Close this date</button></div>
+      <div class="panel"><h6>Duplicate history check</h6><div class="small muted mb-2">Finds TRUE/FALSE records saved twice for the same day, user and check list (e.g. from an import whose Branch column had #REF!). The copy with the real branch is kept.</div>
+        <button class="btn btn-outline-secondary btn-sm w-100" id="btnDup">Check for duplicates</button><div class="small mt-2" id="dupOut"></div></div>
       <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div></div></div>`);
   $('sf').onsubmit = async (ev) => {
     ev.preventDefault();
@@ -856,6 +906,24 @@ function renderSettings() {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{ empty: '' }]), name);
       }
       XLSX.writeFile(wb, `audit_backup_${today()}.xlsx`);
+    } catch (e) { fail(e); }
+  };
+  $('btnDup').onclick = async () => {
+    try {
+      $('dupOut').textContent = 'Checking…';
+      const all = (await getDocs(collection(db, 'records'))).docs.map((d) => ({ id: d.id, ref: d.ref, ...d.data() }));
+      const dupes = L.findDuplicateRecords(all, new Set(S.tasks.map((t) => t.branch)));
+      if (!dupes.length) { $('dupOut').innerHTML = '<span class="text-success">No duplicates found ✔</span>'; return; }
+      const by = {};
+      dupes.forEach((r) => { const k = `${r.user} · branch "${r.branch}"`; by[k] = (by[k] || 0) + 1; });
+      $('dupOut').innerHTML = `<div class="text-warning mb-1">${dupes.length} duplicate record(s): ${Object.entries(by).map(([k, n]) => `${esc(k)} = ${n}`).join(', ')}</div>
+        <button class="btn btn-danger btn-sm w-100" id="btnDupDel">Delete these ${dupes.length} duplicates</button>`;
+      $('btnDupDel').onclick = async () => {
+        if (!(await askConfirm(`Delete ${dupes.length} duplicate history record(s)? The original records stay.`, 'Delete'))) return;
+        for (let i = 0; i < dupes.length; i += 400) { const b = writeBatch(db); dupes.slice(i, i + 400).forEach((r) => b.delete(r.ref)); await b.commit(); }
+        log('DELETE_DUPLICATES', dupes.length); clearCache();
+        $('dupOut').innerHTML = `<span class="text-success">${dupes.length} duplicate(s) deleted ✔</span>`;
+      };
     } catch (e) { fail(e); }
   };
   $('btnImp').onclick = () => importWorkbook($('xf').files[0], document.querySelector('input[name=imode]:checked').value);
