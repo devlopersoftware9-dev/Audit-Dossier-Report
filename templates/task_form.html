@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block content %}
+{% macro field(name, label, cols=3, list=None, type='text', req=False, ph='') %}
+<div class="col-md-{{ cols }}"><label class="form-label small fw-bold">{{ label }}{% if req %} *{% endif %}</label>
+  <input name="{{ name }}" type="{{ type }}" value="{{ t.get(name) or '' }}" class="form-control form-control-sm" {% if list %}list="dl_{{ list }}"{% endif %} {% if req %}required{% endif %} placeholder="{{ ph }}" autocomplete="off"></div>
+{% endmacro %}
+<form method="post" class="panel">
+  <input type="hidden" name="back" value="{{ back }}">
+  <h5>{{ 'Edit Task #' ~ tid if tid else 'Add New Task' }}</h5>
+  <div class="row g-2">
+    {{ field('depart', 'Department', 3, 'depart', req=True) }}
+    {{ field('checklist', 'Check List', 5, 'checklist', req=True) }}
+    {{ field('task', 'Task', 4, 'task', req=True, ph='Daily Followup, Weekly Round, Accounts Batch…') }}
+    <div class="col-12"><label class="form-label small fw-bold">Check list Detail (point)</label>
+      <textarea name="detail" rows="2" class="form-control form-control-sm">{{ t.get('detail') or '' }}</textarea></div>
+    {{ field('user', 'User (assigned to)', 2, 'user', req=True) }}
+    {{ field('company', 'Company', 2, 'company', req=True) }}
+    {{ field('branch', 'Branch', 2, 'branch', req=True) }}
+    {{ field('audit_type', 'Pre / Post Audit', 2, 'audit_type') }}
+    {{ field('recurrence', 'Recurrence', 2, 'recurrence', req=True) }}
+    {{ field('target', 'Target Day / Date', 2, 'target', req=True) }}
+    {{ field('target_month', 'Target Month (Qtr / Yearly)', 2, type='number') }}
+    {{ field('start_time', 'Start Time', 2, type='time') }}
+    {{ field('end_time', 'End Time', 2, type='time') }}
+    {{ field('ordered_by', 'Ordered By', 2) }}
+    {{ field('remarks', 'Remarks', 4) }}
+  </div>
+  <div class="border rounded p-2 mt-3 bg-light">
+    <div class="small fw-bold mb-1">SOP / Links <span class="muted fw-normal">(optional — leave blank if there is no SOP)</span></div>
+    <div class="row g-2">
+      {{ field('sop_name', 'SOP name', 4, ph='e.g. Bilty receiving (WH / Receipt room)') }}
+      {{ field('sop_url', 'SOP link', 4, type='text', ph='https://docs.google.com/…') }}
+      {{ field('checklist_url', 'Check list document link', 4, type='text', ph='optional') }}
+    </div>
+  </div>
+  <div class="form-check mt-2"><input class="form-check-input" type="checkbox" name="hidden" id="hid" value="1" {{ 'checked' if t.get('hidden') in (1, '1', 'on') }}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>
+  <div class="small muted mt-2"><b>Target Day / Date:</b> <code>Daily</code> = every day · <code>Mon … Sun</code> = weekly on that day ·
+    <code>1 – 31</code> = that date every month (one day earlier if it falls on Friday) · <code>Triggered</code> = never in Today's list, only in its department tab.
+    Friday is off except for company RCG.</div>
+  <div class="d-flex gap-2 mt-3">
+    <button class="btn btn-primary btn-sm">Save</button>
+    {% if not tid %}<button class="btn btn-outline-primary btn-sm" name="again" value="1">Save &amp; add another point</button>{% endif %}
+    <a class="btn btn-secondary btn-sm" href="{{ back }}">Cancel</a>
+  </div>
+</form>
+{% for k, vals in L.items() %}<datalist id="dl_{{ k }}">{% for v in vals %}<option value="{{ v }}">{% endfor %}</datalist>{% endfor %}
+{% endblock %}

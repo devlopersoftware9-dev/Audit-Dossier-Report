@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="panel">
+  <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
+    <a class="btn btn-primary btn-sm" href="{{ url_for('admin_task_form', back=request.full_path) }}">＋ Add New Task</a>
+    <input name="q" value="{{ a.q }}" class="form-control form-control-sm" style="max-width:240px" placeholder="Search check list / detail / user / SOP…">
+    <select name="dept" class="form-select form-select-sm" style="width:auto"><option value="">All departments</option>{% for x in L.depart %}<option {{ 'selected' if x == a.dept }}>{{ x }}</option>{% endfor %}</select>
+    <select name="branch" class="form-select form-select-sm" style="width:auto"><option value="">All branches</option>{% for x in L.branch %}<option {{ 'selected' if x == a.branch }}>{{ x }}</option>{% endfor %}</select>
+    <select name="user" class="form-select form-select-sm" style="width:auto"><option value="">All users</option>{% for x in L.user %}<option {{ 'selected' if x == a.user }}>{{ x }}</option>{% endfor %}</select>
+    <select name="show" class="form-select form-select-sm" style="width:auto">
+      {% for v, l in [('active', 'Active tasks'), ('hidden', 'Hidden tasks'), ('today', 'Due today (Y)'), ('all', 'All')] %}<option value="{{ v }}" {{ 'selected' if show == v }}>{{ l }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-outline-primary btn-sm">Filter</button>
+    <span class="muted small">{{ rows | length }} of {{ total }} rows</span>
+  </form>
+  <div class="small muted mt-1">One row = one check-list point. Rows with the same Check List, Task, Branch and User show as one line in the portal, and the points appear in its popup. Use <b>＋ Point</b> to add another point to the same check list.</div>
+</div>
+
+<form method="post" action="{{ url_for('admin_task_action') }}" class="panel">
+  <div class="d-flex gap-2 mb-2">
+    <button name="action" value="hide" class="btn btn-sm btn-outline-warning">Hide selected</button>
+    <button name="action" value="unhide" class="btn btn-sm btn-outline-success">Unhide selected</button>
+    <button name="action" value="delete" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete the selected task rows permanently? (Saved TRUE/FALSE history stays.)')">Delete selected</button>
+  </div>
+  <div class="table-wrap">
+  <table class="table table-sm table-bordered table-hover tbl mb-0">
+    <thead><tr><th><input type="checkbox" id="selAll" class="form-check-input"></th><th>#</th><th>Today</th><th>Depart</th><th>Check List</th><th>Detail</th><th>Task</th><th>User</th><th>Recurrence</th><th>Target</th><th>Company</th><th>Branch</th><th>SOP</th><th>Status</th><th style="min-width:120px"></th></tr></thead>
+    <tbody>
+    {% for t in rows[:2000] %}
+      <tr class="{{ 'hidden-row' if t.hidden }}">
+        <td><input type="checkbox" name="ids" value="{{ t.id }}" class="form-check-input"></td>
+        <td>{{ t.id }}</td>
+        <td>{% if t.due_today and not t.hidden %}<span class="badge bg-primary">Y</span>{% else %}N{% endif %}</td>
+        <td>{{ t.depart }}</td><td>{{ t.checklist }}</td><td class="small">{{ t.detail }}</td><td>{{ t.task }}</td><td>{{ t.user }}</td>
+        <td>{{ t.recurrence }}</td><td>{{ t.target }}{% if t.target_month %} / M{{ t.target_month }}{% endif %}</td><td>{{ t.company }}</td><td>{{ t.branch }}</td>
+        <td>{% if t.sop_url %}<a href="{{ t.sop_url }}" target="_blank" rel="noopener">{{ t.sop_name or 'Link' }}</a>{% else %}{{ t.sop_name }}{% endif %}</td>
+        <td>{% if t.hidden %}<span class="badge bg-secondary">Hidden</span>{% else %}<span class="badge bg-success">Active</span>{% endif %}</td>
+        <td class="text-nowrap">
+          <a class="btn btn-sm btn-outline-primary py-0" href="{{ url_for('admin_task_form', tid=t.id, back=request.full_path) }}">Edit</a>
+          <a class="btn btn-sm btn-outline-secondary py-0" title="Add another point to this check list" href="{{ url_for('admin_task_form', copy=t.id, back=request.full_path) }}">＋ Point</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</form>
+{% endblock %}

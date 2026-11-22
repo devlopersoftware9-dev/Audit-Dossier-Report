@@ -1,0 +1,17 @@
+# Render Blueprint — https://render.com  (New + → Blueprint → pick this repo)
+services:
+  - type: web
+    name: audit-dossier
+    runtime: python
+    plan: free
+    region: singapore
+    branch: audit-portal-system
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:app --workers 2 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL        # paste the Neon connection string here (postgresql://...)
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true

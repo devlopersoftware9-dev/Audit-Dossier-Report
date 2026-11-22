@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% from '_macros.html' import money %}
+{% block content %}
+<div class="row g-2">
+  <div class="col-lg-8"><div class="panel">
+    <h6>Users</h6>
+    {% if missing %}<div class="alert alert-warning py-2 small">Tasks are assigned to names that have no login: <b>{{ missing | join(', ') }}</b>. Add them on the right.</div>{% endif %}
+    <div class="table-wrap">
+    <table class="table table-sm table-bordered tbl mb-0">
+      <thead><tr><th>Username</th><th>Role</th><th>Monthly Salary</th><th>Active</th><th>Active tasks</th><th>Last login</th><th></th></tr></thead>
+      <tbody>
+      {% for u in users %}
+        <tr class="{{ '' if u.active else 'hidden-row' }}"><td><b>{{ u.username }}</b></td><td>{{ u.role }}</td><td>{{ money(u.salary) }}</td>
+          <td>{{ 'Y' if u.active else 'N' }}</td><td>{{ u.n }}</td><td class="small">{{ u.last_login or '' }}</td>
+          <td><button type="button" class="btn btn-sm btn-outline-primary py-0"
+            onclick="fillUser({{ {'username': u.username, 'role': u.role, 'salary': u.salary, 'active': u.active} | tojson | forceescape }})">Edit</button></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div></div>
+  <div class="col-lg-4"><form method="post" class="panel" id="userForm">
+    <h6 id="ufTitle">Add / Edit User</h6>
+    <label class="form-label small fw-bold">Username (same name used in tasks)</label><input name="username" class="form-control form-control-sm mb-2" required>
+    <label class="form-label small fw-bold">Role</label>
+    <select name="role" class="form-select form-select-sm mb-2"><option>Officer</option><option>Admin</option></select>
+    <label class="form-label small fw-bold">Monthly Salary (for % fine)</label><input name="salary" type="number" min="0" class="form-control form-control-sm mb-2">
+    <label class="form-label small fw-bold">Password <span class="muted">(blank = keep current)</span></label><input name="password" class="form-control form-control-sm mb-2">
+    <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="active" value="1" id="ufA" checked><label for="ufA" class="form-check-label">Active</label></div>
+    <button class="btn btn-primary btn-sm">Save User</button>
+    <button type="reset" class="btn btn-outline-secondary btn-sm">New</button>
+  </form></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function fillUser(u) {
+  var f = document.getElementById('userForm');
+  f.username.value = u.username; f.role.value = u.role; f.salary.value = u.salary; f.active.checked = !!u.active; f.password.value = '';
+  document.getElementById('ufTitle').textContent = 'Edit ' + u.username;
+}
+</script>
+{% endblock %}
