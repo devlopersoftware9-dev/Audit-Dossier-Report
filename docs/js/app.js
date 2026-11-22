@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=11';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=11';
+import * as L from './logic.js?v=12';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=12';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -332,6 +332,35 @@ function renderSetup() {
   };
 }
 
+// ------------------------------------------------------------------ evidence pictures
+// Firebase Storage is not free any more, so pictures are shrunk (max 1280 px, JPEG) and kept in Firestore.
+async function compressImage(file, maxSide = 1280) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('This file is not a picture.')); i.src = url; });
+    let side = maxSide, data = '', w = 0, h = 0;
+    for (let tries = 0; tries < 4; tries++) {
+      const k = Math.min(1, side / Math.max(img.naturalWidth, img.naturalHeight));
+      w = Math.round(img.naturalWidth * k); h = Math.round(img.naturalHeight * k);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      for (let q = 0.7; q >= 0.35; q -= 0.1) { data = c.toDataURL('image/jpeg', q); if (data.length < 450000) break; }
+      if (data.length < 450000) break;
+      side = Math.round(side * 0.75);
+    }
+    return { data, w, h };
+  } finally { URL.revokeObjectURL(url); }
+}
+async function showEvidence(ids, title) {
+  if (!ids.length) return;
+  showModal(`Evidence — ${title}`, loading);
+  const docs = await Promise.all(ids.map((id) => getDoc(doc(db, 'evidence', id)).catch(() => null)));
+  $('detailBody').innerHTML = docs.filter((d) => d && d.exists()).map((d) => {
+    const x = d.data();
+    return `<figure class="mb-3"><img src="${x.data}" class="img-fluid rounded border" alt="evidence"><figcaption class="small muted mt-1">${esc(x.ts)} · by ${esc(x.by)}</figcaption></figure>`;
+  }).join('') || '<div class="muted">Picture not found.</div>';
+}
+
 // ------------------------------------------------------------------ tasks portal
 async function renderTasks(q) {
   mount('tasks', loading);
@@ -358,9 +387,10 @@ async function renderTasks(q) {
   const qs = S.isAdmin && q.user ? { user: q.user } : {};
   const pill = (k, v, label, cls) => `<a class="btn btn-sm ${tab === k && val === v ? 'btn-' + cls + (cls === 'info' ? ' text-white' : '') : 'btn-outline-' + cls}" href="${link('tasks', { tab: k === 'today' ? '' : k, v, ...qs })}">${esc(label)}</a>`;
   const isAll = S.isAdmin && !viewLc;
+  const ACT = ['Mark (TRUE)', 'Department', 'Remarks', 'Evidence'];
   const head = tab === 'today'
-    ? ['Company', 'Branch Name', 'Task', 'Depart', 'Check List', 'SOP', 'Target Day / Date', 'Recurrence', ...(S.isAdmin ? ['User'] : []), 'Remarks', 'Mark']
-    : ['Depart', 'Check List', 'Task', 'Recurrence', 'Target Day / Date', 'Company', 'Branch Name', 'SOP', ...(S.isAdmin ? ['User'] : []), 'Due Today', 'Remarks', 'Mark'];
+    ? ['Company', 'Branch Name', 'Task', 'Depart', 'Check List', 'SOP', 'Target Day / Date', 'Recurrence', ...(S.isAdmin ? ['User'] : []), ...ACT]
+    : ['Depart', 'Check List', 'Task', 'Recurrence', 'Target Day / Date', 'Company', 'Branch Name', 'SOP', ...(S.isAdmin ? ['User'] : []), 'Due Today', ...ACT];
   let body = '';
   rows.forEach((r, i) => {
     if (i === 0 || r.bucket !== rows[i - 1].bucket) {
@@ -369,12 +399,19 @@ async function renderTasks(q) {
     }
     const cl = `<button type="button" class="link-btn" data-i="${i}">${esc(r.checklist)}</button>`;
     const sop = r.sop_url ? `<a href="${esc(r.sop_url)}" target="_blank" rel="noopener">${esc(r.sop_name || 'Open SOP')}</a>` : esc(r.sop_name);
-    const mark = `<td><input class="form-control form-control-sm remarks-in" value="${esc(r.remarks)}" placeholder="Enter remarks…"></td>
-      <td class="text-center"><input type="checkbox" class="form-check-input mark-box" ${r.status ? 'checked' : ''} title="${esc(r.marked_at ? 'Saved ' + r.marked_at : 'Not saved yet')}"></td>`;
+    const td = (label, html, cls = '') => `<td data-label="${label}" class="${cls}">${html}</td>`;
+    const nEv = (r.evidence_ids || []).length;
+    const mark = td('Mark (TRUE)', `<input type="checkbox" class="form-check-input mark-box" ${r.status ? 'checked' : ''} title="${esc(r.marked_at ? 'Ticked ' + r.marked_at + (r.by ? ' by ' + r.by : '') : 'Not ticked yet')}">`, 'text-center td-mark')
+      + td('Department', `<select class="form-select form-select-sm dept-sel ${r.dept_status === 'Incomplete' ? 'is-bad' : r.dept_status === 'Complete' ? 'is-good' : ''}" ${r.status ? '' : 'disabled'} title="Tick TRUE first">
+          <option value="">—</option>${L.DEPT_STATUSES.map((x) => `<option ${r.dept_status === x ? 'selected' : ''}>${x}</option>`).join('')}</select>`)
+      + td('Remarks', `<input class="form-control form-control-sm remarks-in" value="${esc(r.remarks)}" placeholder="Enter remarks…">`)
+      + td('Evidence', `<div class="d-flex gap-1 align-items-center"><button type="button" class="btn btn-sm btn-outline-secondary ev-add" title="Take / attach a picture">📷</button>
+          <button type="button" class="btn btn-sm btn-outline-info ev-view ${nEv ? '' : 'd-none'}" title="View pictures">🖼 <span class="ev-n">${nEv}</span></button>
+          <input type="file" accept="image/*" capture="environment" class="d-none ev-file"></div>`);
     const cls = 'b-' + r.bucket.replace(/[ /]/g, '') + (r.status ? ' row-done' : '');
     body += tab === 'today'
-      ? `<tr class="${cls}" data-i="${i}"><td>${esc(r.company)}</td><td>${esc(r.branch)}</td><td><span class="task-badge">${esc(r.task)}</span></td><td>${esc(r.depart)}</td><td>${cl}</td><td>${sop}</td><td>${esc(r.target)}</td><td>${esc(r.recurrence)}</td>${S.isAdmin ? `<td>${esc(r.user)}</td>` : ''}${mark}</tr>`
-      : `<tr class="${cls}" data-i="${i}"><td>${esc(r.depart)}</td><td>${cl}</td><td>${esc(r.task)}</td><td>${esc(r.recurrence)}</td><td>${esc(r.target)}</td><td>${esc(r.company)}</td><td>${esc(r.branch)}</td><td>${sop}</td>${S.isAdmin ? `<td>${esc(r.user)}</td>` : ''}<td>${r.due_today ? '<span class="badge bg-primary">Y</span>' : '<span class="muted">N</span>'}</td>${mark}</tr>`;
+      ? `<tr class="${cls}" data-i="${i}">${td('Company', esc(r.company), 'm-hide')}${td('Branch', esc(r.branch))}${td('Task', `<span class="task-badge">${esc(r.task)}</span>`)}${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('SOP', sop || '<span class="muted">—</span>')}${td('Target', esc(r.target), 'm-hide')}${td('Recurrence', esc(r.recurrence), 'm-hide')}${S.isAdmin ? td('User', esc(r.user)) : ''}${mark}</tr>`
+      : `<tr class="${cls}" data-i="${i}">${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('Task', esc(r.task))}${td('Recurrence', esc(r.recurrence))}${td('Target', esc(r.target))}${td('Company', esc(r.company), 'm-hide')}${td('Branch', esc(r.branch))}${td('SOP', sop || '<span class="muted">—</span>')}${S.isAdmin ? td('User', esc(r.user)) : ''}${td('Due Today', r.due_today ? '<span class="badge bg-primary">Y</span>' : '<span class="muted">N</span>')}${mark}</tr>`;
   });
   const card = (cls, lbl, v, id = '') => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val" ${id ? `id="${id}"` : ''}>${v}</div></div></div>`;
   $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-blue', 'Total Tasks (Today)', st.total, 'cTotal')}${card('bg-teal', 'Completed', st.done, 'cDone')}${card('bg-amber', 'Pending', st.pending, 'cPending')}${card('bg-green', 'Completion Progress', st.pct + '%', 'cPct')}${card('bg-slate', 'This Month Efficiency', mtd)}${card('bg-red', 'This Month Fine (Rs)', fine)}</div>
@@ -384,7 +421,7 @@ async function renderTasks(q) {
       <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active).map((u) => u.username), q.user || '')}</select>` : ''}
         <button class="btn btn-sm btn-success text-nowrap" id="btnExp">⬇ Export Excel</button></div>
     </div>
-    <div class="panel"><div class="table-wrap">${rows.length ? `<table class="table table-bordered table-striped table-hover table-sm tbl mb-0"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`
+    <div class="panel"><div class="table-wrap">${rows.length ? `<table class="table table-bordered table-striped table-hover table-sm tbl tbl-cards mb-0"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`
       : `<div class="text-center p-4 muted">${tab === 'today' ? 'No task due today 🎉' : 'No tasks in this tab.'}</div>`}</div></div>`;
   if ($('viewAs')) $('viewAs').onchange = (e) => go('tasks', { tab: tab === 'today' ? '' : tab, v: val, user: e.target.value });
   $('btnExp').onclick = () => exportXlsx(tab === 'today' ? 'Todays_Task_' + t : val + '_Tasks',
@@ -404,23 +441,58 @@ async function renderTasks(q) {
     const grp = ev.target.closest('.grp-row');
     if (grp) main.querySelectorAll('tr.b-' + grp.dataset.bucket.replace(/[ /]/g, '')).forEach((tr) => tr.classList.toggle('d-none'));
   };
+  const saveRow = async (tr, r, note) => {
+    const box = tr.querySelector('.mark-box'), rem = tr.querySelector('.remarks-in'), dep = tr.querySelector('.dept-sel');
+    if (!box.checked) dep.value = '';
+    dep.disabled = !box.checked;
+    const due = L.isScheduled(r, t, opts());
+    const source = S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
+    const rec = L.makeRecord(r, t, r.user, box.checked, rem.value, source, nowText(), dep.value, r.evidence_ids || []);
+    rec.by = S.prof.username;
+    await setDoc(doc(db, 'marks', await recordId(rec)), rec);
+    r.status = box.checked; r.remarks = rem.value; r.dept_status = rec.dept_status;
+    tr.classList.toggle('row-done', box.checked);
+    dep.classList.toggle('is-bad', rec.dept_status === 'Incomplete');
+    dep.classList.toggle('is-good', rec.dept_status === 'Complete');
+    box.title = 'Ticked ' + rec.timestamp + ' — saved to the database at ' + closeLabel();
+    if (note) toast(note + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
+    return rec;
+  };
+  main.addEventListener('click', async (ev) => {
+    const add = ev.target.closest('.ev-add'), view = ev.target.closest('.ev-view');
+    if (!add && !view) return;
+    const tr = ev.target.closest('tr[data-i]');
+    const r = rows[+tr.dataset.i];
+    if (add) { tr.querySelector('.ev-file').click(); return; }
+    showEvidence(r.evidence_ids || [], r.checklist);
+  });
   main.onchange = async (ev) => {
     const tr = ev.target.closest('tr[data-i]');
     if (!tr) return;
     const r = rows[+tr.dataset.i];
-    const box = tr.querySelector('.mark-box'), rem = tr.querySelector('.remarks-in');
+    const box = tr.querySelector('.mark-box');
     const fromBox = ev.target === box;
     tr.classList.add('saving');
     try {
-      const due = L.isScheduled(r, t, opts());
-      const source = S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
-      const rec = L.makeRecord(r, t, r.user, box.checked, rem.value, source, nowText());
-      rec.by = S.prof.username;
-      await setDoc(doc(db, 'marks', await recordId(rec)), rec);
-      r.status = box.checked; r.remarks = rem.value;
-      tr.classList.toggle('row-done', box.checked);
-      box.title = 'Ticked ' + rec.timestamp + ' — saved to the database at ' + closeLabel();
-      toast((box.checked ? '✔ TRUE' : '✖ FALSE') + ` noted — goes to the database at ${closeLabel()}` + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
+      if (ev.target.classList.contains('ev-file')) {
+        const file = ev.target.files[0];
+        ev.target.value = '';
+        if (!file) return;
+        if ((r.evidence_ids || []).length >= 5) throw new Error('Maximum 5 pictures per task.');
+        toast('Uploading picture…', 'info');
+        const img = await compressImage(file);
+        const ref = await addDoc(collection(db, 'evidence'), { date: t, user: r.user, user_lc: L.norm(r.user), department: r.depart,
+          checklist: r.checklist, task_type: r.task, data: img.data, w: img.w, h: img.h, by: S.prof.username, ts: nowText() });
+        r.evidence_ids = [...(r.evidence_ids || []), ref.id];
+        await saveRow(tr, r, '📷 Picture attached');
+        tr.querySelector('.ev-n').textContent = r.evidence_ids.length;
+        tr.querySelector('.ev-view').classList.remove('d-none');
+        return;
+      }
+      if (ev.target.classList.contains('dept-sel') && !box.checked) { ev.target.value = ''; throw new Error('Tick TRUE first, then choose Complete / Incomplete.'); }
+      const rec = await saveRow(tr, r, null);
+      toast(ev.target.classList.contains('dept-sel') ? `Department: ${rec.dept_status || '—'}`
+        : (box.checked ? '✔ TRUE' : '✖ FALSE') + ` noted — goes to the database at ${closeLabel()}`, box.checked ? 'success' : 'secondary');
       if (tab === 'today') {
         const s2 = L.stats(rows);
         $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
@@ -445,6 +517,15 @@ async function renderTasks(q) {
       if (document.activeElement !== rem) rem.value = r.remarks;
       tr.classList.toggle('row-done', r.status);
       box.title = `Ticked ${m.timestamp}${m.by ? ' by ' + m.by : ''}`;
+      const dep = tr.querySelector('.dept-sel');
+      r.dept_status = m.dept_status || '';
+      if (document.activeElement !== dep) dep.value = r.dept_status;
+      dep.disabled = !r.status;
+      dep.classList.toggle('is-bad', r.dept_status === 'Incomplete');
+      dep.classList.toggle('is-good', r.dept_status === 'Complete');
+      r.evidence_ids = m.evidence_ids || [];
+      tr.querySelector('.ev-n').textContent = r.evidence_ids.length;
+      tr.querySelector('.ev-view').classList.toggle('d-none', !r.evidence_ids.length);
     });
     if ($('pendBox')) $('pendBox').textContent = snap.size;
     if (tab === 'today' && $('cDone')) {
@@ -465,7 +546,7 @@ function filterBar(f, extra = '') {
     <div class="col-md-2"><label class="form-label small fw-bold">Branch</label><select name="branch" class="form-select form-select-sm">${opt(o.branches, f.branch, 'All branches')}</select></div>${extra}`;
 }
 const defF = (q, start) => ({ start: q.start || start || today(), end: q.end || today(), status: q.status || 'ALL', user: q.user || '',
-  department: q.department || '', branch: q.branch || '', task_type: q.task_type || '', checklist: q.checklist || '', source: q.source || '', group_by: q.group_by || 'user' });
+  department: q.department || '', branch: q.branch || '', task_type: q.task_type || '', checklist: q.checklist || '', source: q.source || '', group_by: q.group_by || 'user', dept_status: q.dept_status || '' });
 
 async function renderReport(q) {
   const f = defF(q);
@@ -475,12 +556,14 @@ async function renderReport(q) {
       ${[['ALL', 'All'], ['TRUE', 'TRUE (Done)'], ['FALSE', 'FALSE (Not done)']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     ${filterBar(f, `<div class="col-md-3"><label class="form-label small fw-bold">Task Type</label><select name="task_type" class="form-select form-select-sm">${opt(o.task_types, f.task_type, 'All task types')}</select></div>
       <div class="col-md-3"><label class="form-label small fw-bold">Check List contains</label><input name="checklist" value="${esc(f.checklist)}" class="form-control form-control-sm"></div>
-      <div class="col-md-2"><label class="form-label small fw-bold">Source</label><select name="source" class="form-select form-select-sm">${opt(['Portal', 'Auto-Closed', 'Admin', 'Extra', 'Imported'], f.source, 'All')}</select></div>`)}</div>
+      <div class="col-md-2"><label class="form-label small fw-bold">Source</label><select name="source" class="form-select form-select-sm">${opt(['Portal', 'Auto-Closed', 'Admin', 'Extra', 'Imported'], f.source, 'All')}</select></div>
+      <div class="col-md-2"><label class="form-label small fw-bold">Department status</label><select name="dept_status" class="form-select form-select-sm">
+        ${[['', 'All'], ['Complete', 'Complete'], ['Incomplete', 'Incomplete'], ['none', 'Not given']].map(([v, l]) => `<option value="${v}" ${f.dept_status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`)}</div>
     <button class="btn btn-primary w-100 mt-2 btn-sm">Generate Report</button></form><div class="panel" id="out">${q.start ? loading : '<div class="muted p-3">Choose filters and press Generate Report.</div>'}</div>`);
   $('rf').onsubmit = (ev) => { ev.preventDefault(); go('report', readForm(ev.target)); };
   let rows = [];
-  $('btnExp').onclick = () => exportXlsx(`Report_${f.start}_to_${f.end}`, ['Date', 'User', 'Company', 'Branch', 'Department', 'Check List', 'To-Do', 'Task Type', 'Status', 'Remarks', 'Timestamp', 'Source'],
-    rows.map((r) => [r.date, r.user, r.company, r.branch, r.department, r.checklist, r.todo, r.task_type, r.status ? 'TRUE' : 'FALSE', r.remarks, r.timestamp, r.source]));
+  $('btnExp').onclick = () => exportXlsx(`Report_${f.start}_to_${f.end}`, ['Date', 'User', 'Company', 'Branch', 'Department', 'Check List', 'To-Do', 'Task Type', 'Status', 'Department status', 'Pictures', 'Remarks', 'Timestamp', 'Ticked by', 'Source'],
+    rows.map((r) => [r.date, r.user, r.company, r.branch, r.department, r.checklist, r.todo, r.task_type, r.status ? 'TRUE' : 'FALSE', r.dept_status || '', (r.evidence_ids || []).length, r.remarks, r.timestamp, r.by || '', r.source]));
   if (!q.start) return;
   const my = S.seq;
   const recs = await fetchRecords(f.start, f.end, S.isAdmin ? L.norm(f.user) : null, true);
@@ -489,12 +572,16 @@ async function renderReport(q) {
   const tr = rows.filter((r) => r.status).length;
   $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Records: ${rows.length}</span> <span class="badge bg-success">TRUE: ${tr}</span> <span class="badge bg-danger">FALSE: ${rows.length - tr}</span>
     ${f.status === 'ALL' && rows.length ? `<span class="badge bg-primary">Efficiency: ${Math.round(tr * 1000 / rows.length) / 10}%</span>` : ''}</div>
-    <div class="table-wrap">${rows.length ? `<table class="table table-sm table-striped table-bordered tbl mb-0"><thead><tr><th>Date</th><th>User</th><th>Company</th><th>Branch</th><th>Department</th><th>Check List</th><th>Task Type</th><th>Status</th><th>Remarks</th><th>Timestamp</th><th>Source</th>${S.isAdmin ? '<th>Edit</th>' : ''}</tr></thead><tbody>
+    <div class="table-wrap">${rows.length ? `<table class="table table-sm table-striped table-bordered tbl mb-0"><thead><tr><th>Date</th><th>User</th><th>Company</th><th>Branch</th><th>Department</th><th>Check List</th><th>Task Type</th><th>Status</th><th>Department</th><th>Pictures</th><th>Remarks</th><th>Timestamp</th><th>Source</th>${S.isAdmin ? '<th>Edit</th>' : ''}</tr></thead><tbody>
     ${rows.slice(0, 3000).map((r, i) => `<tr><td class="text-nowrap">${r.date}</td><td>${esc(r.user)}</td><td>${esc(r.company)}</td><td>${esc(r.branch)}</td><td>${esc(r.department)}</td><td title="${esc(r.todo)}">${esc(r.checklist)}</td><td>${esc(r.task_type)}</td>
-      <td>${r.status ? '<span class="badge bg-success">TRUE</span>' : '<span class="badge bg-danger">FALSE</span>'}</td><td>${esc(r.remarks)}</td><td class="small text-nowrap">${esc(r.timestamp)}</td><td class="small">${esc(r.source)}</td>
+      <td>${r.status ? '<span class="badge bg-success">TRUE</span>' : '<span class="badge bg-danger">FALSE</span>'}</td>
+      <td>${r.dept_status === 'Incomplete' ? '<span class="badge bg-warning text-dark">Incomplete</span>' : r.dept_status === 'Complete' ? '<span class="badge bg-info text-dark">Complete</span>' : '<span class="muted">—</span>'}</td>
+      <td>${(r.evidence_ids || []).length ? `<button class="btn btn-sm btn-outline-info py-0 evv" data-ev="${i}">🖼 ${(r.evidence_ids || []).length}</button>` : ''}</td><td>${esc(r.remarks)}</td><td class="small text-nowrap">${esc(r.timestamp)}</td><td class="small">${esc(r.source)}</td>
       ${S.isAdmin ? `<td><div class="d-flex gap-1" data-i="${i}"><select class="form-select form-select-sm py-0 es" style="width:80px"><option value="1" ${r.status ? 'selected' : ''}>TRUE</option><option value="0" ${r.status ? '' : 'selected'}>FALSE</option></select><input class="form-control form-control-sm py-0 er" style="width:120px" value="${esc(r.remarks)}"><button class="btn btn-sm btn-outline-secondary py-0 eb">Save</button></div></td>` : ''}</tr>`).join('')}
     </tbody></table>${rows.length > 3000 ? '<div class="small muted p-2">Showing first 3000 rows — Export Excel has all of them.</div>' : ''}` : '<div class="text-center p-4 muted">No records for this filter.</div>'}</div>`;
   $('out').onclick = async (ev) => {
+    const v = ev.target.closest('.evv');
+    if (v) { const r = rows[+v.dataset.ev]; showEvidence(r.evidence_ids || [], `${r.checklist} (${r.date})`); return; }
     const b = ev.target.closest('.eb'); if (!b) return;
     const box = b.closest('[data-i]'); const r = rows[+box.dataset.i];
     try {
@@ -521,11 +608,11 @@ async function renderEff(q) {
   const recs = await fetchRecords(f.start, f.end, S.isAdmin ? L.norm(f.user) : null);
   if (my !== S.seq) return;
   const d = L.efficiency(recs, f, S.settings, salaries(), S.isAdmin ? null : S.prof.username);
-  $('btnExp').onclick = () => exportXlsx(`Efficiency_${f.start}_to_${f.end}`, [d.group_by, 'Scheduled', 'Done (TRUE)', 'Missed (FALSE)', 'Efficiency %', 'Grade', 'Per-task Fine', 'Salary', 'Deduct %', '% Fine', 'Total Fine'],
-    d.rows.map((r) => [r.key, r.total, r.done, r.missed, r.pct, r.grade, r.task_fine, r.salary, r.deduct_pct, r.pct_fine, r.total_fine]));
-  $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Scheduled: ${d.totals.total}</span> <span class="badge bg-success">Done: ${d.totals.done}</span> <span class="badge bg-danger">Missed: ${d.totals.missed}</span> <span class="badge bg-primary">Efficiency: ${d.totals.pct}%</span> <span class="badge bg-dark">Total fine: Rs ${money(d.totals.total_fine)}</span> <span class="small muted">Fine mode: ${esc(d.mode)}</span></div>
-    <div class="table-wrap">${d.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>${esc(d.group_by.replace('_', ' '))}</th><th>Scheduled</th><th>Done (TRUE)</th><th>Missed (FALSE)</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Per-task Fine</th>${d.show_pct ? '<th>Salary</th><th>Deduct %</th><th>% Fine</th>' : ''}<th>Total Fine</th></tr></thead><tbody>
-    ${d.rows.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.total}</td><td class="text-success">${g.done}</td><td class="text-danger">${g.missed}</td><td>${pctBar(g.pct)}</td><td class="grade">${esc(g.grade)}</td><td>${money(g.task_fine)}</td>${d.show_pct ? `<td>${money(g.salary)}</td><td>${g.deduct_pct}%</td><td>${money(g.pct_fine)}</td>` : ''}<td><b>${money(g.total_fine)}</b></td></tr>`).join('')}
+  $('btnExp').onclick = () => exportXlsx(`Efficiency_${f.start}_to_${f.end}`, [d.group_by, 'Scheduled', 'Done (TRUE)', 'Missed (FALSE)', 'Efficiency %', 'Grade', 'Per-task Fine', 'Salary', 'Deduct %', '% Fine', 'Auditor Fine', 'Dept Incomplete', 'Dept Fine'],
+    d.rows.map((r) => [r.key, r.total, r.done, r.missed, r.pct, r.grade, r.task_fine, r.salary, r.deduct_pct, r.pct_fine, r.total_fine, r.incomplete, r.dept_fine]));
+  $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Scheduled: ${d.totals.total}</span> <span class="badge bg-success">Done: ${d.totals.done}</span> <span class="badge bg-danger">Missed: ${d.totals.missed}</span> <span class="badge bg-primary">Efficiency: ${d.totals.pct}%</span> <span class="badge bg-dark">Auditor fine: Rs ${money(d.totals.total_fine)}</span> <span class="badge bg-warning text-dark">Dept incomplete: ${d.totals.incomplete} · Dept fine: Rs ${money(d.totals.dept_fine)}</span> <span class="small muted">Fine mode: ${esc(d.mode)}</span></div>
+    <div class="table-wrap">${d.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>${esc(d.group_by.replace('_', ' '))}</th><th>Scheduled</th><th>Done (TRUE)</th><th>Missed (FALSE)</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Per-task Fine</th>${d.show_pct ? '<th>Salary</th><th>Deduct %</th><th>% Fine</th>' : ''}<th>Auditor Fine</th><th>Dept Incomplete</th><th>Dept Fine</th></tr></thead><tbody>
+    ${d.rows.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.total}</td><td class="text-success">${g.done}</td><td class="text-danger">${g.missed}</td><td>${pctBar(g.pct)}</td><td class="grade">${esc(g.grade)}</td><td>${money(g.task_fine)}</td>${d.show_pct ? `<td>${money(g.salary)}</td><td>${g.deduct_pct}%</td><td>${money(g.pct_fine)}</td>` : ''}<td><b>${money(g.total_fine)}</b></td><td>${g.incomplete || ''}</td><td>${g.dept_fine ? '<b class="text-warning">' + money(g.dept_fine) + '</b>' : ''}</td></tr>`).join('')}
     </tbody></table>` : '<div class="text-center p-4 muted">No records in this range.</div>'}</div>`;
 }
 
@@ -556,12 +643,26 @@ async function renderMonthly(q) {
       rows.push([ym, u.key, 'ALL', u.total, u.done, u.missed, u.pct, u.grade, u.salary, u.task_fine, u.deduct_pct, u.pct_fine, u.total_fine]);
       u.departments.forEach((d) => rows.push([ym, u.key, d.department, d.total, d.done, d.missed, d.pct, '', '', '', '', '', '']));
     });
-    exportXlsx('Monthly_Performance_' + ym, ['Month', 'User', 'Department', 'Scheduled', 'Done', 'Missed', 'Efficiency %', 'Grade', 'Salary', 'Per-task Fine', 'Deduct %', '% Fine', 'Total Fine'], rows);
+    m.dept_fines.forEach((d) => rows.push([ym, 'DEPARTMENT FINE', d.key, d.checked, d.complete, d.incomplete, '', '', '', '', '', '', d.fine]));
+    exportXlsx('Monthly_Performance_' + ym, ['Month', 'User', 'Department', 'Scheduled / Checked', 'Done / Complete', 'Missed / Incomplete', 'Efficiency %', 'Grade', 'Salary', 'Per-task Fine', 'Deduct %', '% Fine', 'Total Fine'], rows);
   };
   $('out').innerHTML = m.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>#</th><th>User</th><th>Scheduled</th><th>Done</th><th>Missed</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Salary</th><th>Per-task Fine</th><th>Deduct %</th><th>% Fine</th><th>Total Fine</th><th></th></tr></thead><tbody>
     ${m.rows.map((u, i) => `<tr><td>${i + 1}</td><td><b>${esc(u.key)}</b></td><td>${u.total}</td><td class="text-success">${u.done}</td><td class="text-danger">${u.missed}</td><td>${pctBar(u.pct)}</td><td class="grade">${esc(u.grade)}</td><td>${money(u.salary)}</td><td>${money(u.task_fine)}</td><td>${u.deduct_pct}%</td><td>${money(u.pct_fine)}</td><td><b>${money(u.total_fine)}</b></td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Details</button></td></tr>`).join('')}
     </tbody></table>` : '<div class="text-center p-4 muted">No records for this month.</div>';
+  if (m.dept_fines.length) {
+    $('out').insertAdjacentHTML('beforeend', `<h6 class="mt-3">🏢 Department fines (auditor ticked TRUE and marked the department "Incomplete")</h6>
+      <table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>Company · Department</th><th>Checked (TRUE)</th><th>Complete</th><th>Incomplete</th><th>Dept Fine (Rs)</th><th></th></tr></thead><tbody>
+      ${m.dept_fines.map((d, i) => `<tr><td><b>${esc(d.key)}</b></td><td>${d.checked}</td><td class="text-success">${d.complete}</td><td class="text-warning">${d.incomplete}</td><td><b>${money(d.fine)}</b></td><td>${d.incomplete ? `<button class="btn btn-sm btn-outline-warning py-0" data-df="${i}">Details</button>` : ''}</td></tr>`).join('')}
+      </tbody></table>`);
+  }
   $('out').onclick = (ev) => {
+    const df = ev.target.closest('[data-df]');
+    if (df) {
+      const d = m.dept_fines[+df.dataset.df];
+      showModal(`${d.key} — Incomplete (${ym})`, `<table class="table table-sm table-striped"><thead><tr><th>Date</th><th>Check List</th><th>Task</th><th>Auditor</th><th>Remarks</th><th>Pictures</th></tr></thead><tbody>
+        ${d.items.map((x) => `<tr><td class="text-nowrap">${x.date}</td><td>${esc(x.checklist)}</td><td>${esc(x.task_type)}</td><td>${esc(x.user)}</td><td>${esc(x.remarks)}</td><td>${x.evidence || ''}</td></tr>`).join('')}</tbody></table>`);
+      return;
+    }
     const b = ev.target.closest('[data-i]'); if (!b) return;
     const u = m.rows[+b.dataset.i];
     showModal(`${u.key} — ${ym}`, `<h6>Department wise</h6><table class="table table-sm table-bordered"><thead><tr><th>Department</th><th>Scheduled</th><th>Done</th><th>Missed</th><th>Efficiency</th></tr></thead><tbody>
@@ -792,6 +893,7 @@ async function renameUser(u, newName) {
   const tasks = await upd('tasks');
   const records = await upd('records');
   await upd('marks');
+  await upd('evidence');
   await updateDoc(doc(db, 'users', u.uid), { username: newName, username_lc: newLc });
   if (newLc !== oldLc) {
     await setDoc(doc(db, 'usernames', newLc), map.exists() ? map.data() : { email: u.email, uid: u.uid, n: 0 });
@@ -865,12 +967,13 @@ async function renderUsers() {
 function renderSettings() {
   mount('settings', `<div class="row g-2"><div class="col-lg-8">
     <div class="panel"><h6>📘 How efficiency and fines are worked out</h6><div class="small" style="line-height:1.7">
-      <b>Who is fined?</b> Always the <b>user (auditor)</b> the task is assigned to (column 1st). Departments are <b>not</b> fined — the department only decides the Rs rate when <code>DEPT_FINES</code> is set, and the Efficiency report grouped by Department shows how much of the users' fines came from each department.<br>
+      <b>Who is fined?</b> Two separate fines: the <b>auditor</b> (user in column 1st) for tasks he did not check (FALSE) — rules 1 and 2 — and the <b>department</b> when the auditor checked the work and found it <b>Incomplete</b> — rule 3. <code>DEPT_FINES</code> only changes the auditor's Rs rate for tasks of that department.<br>
       <b>What counts?</b> Every task that was due on a day (it showed in Todays Task). At ${esc(closeLabel())} it is saved as <b>TRUE</b> (ticked) or <b>FALSE</b> (not ticked). Triggered tasks and ticks on a day the task was not due ("Extra") are not counted.<br>
       <b>Efficiency %</b> = TRUE ÷ (TRUE + FALSE) × 100 for the chosen days or month.<br>
       <b>1) Per-task fine</b> (FINE_MODE PER_TASK or BOTH) = number of FALSE × <code>FINE_PER_TASK</code> (or the department's rate from <code>DEPT_FINES</code>).<br>
       <b>2) Salary % fine</b> (FINE_MODE PERCENT or BOTH) = monthly salary × the % from <code>FINE_PCT_SLABS</code> for the month's efficiency. Set each user's salary in <b>Users</b>; salary 0 = no % fine.<br>
       <b>Total fine</b> = 1 + 2. It is final at month end; the month-end snapshot is saved on the 1st.<br>
+      <b>3) Department fine</b> (separate from the auditor): the auditor first ticks <b>TRUE</b> (he checked it), then chooses the department's work: <b>Complete</b> or <b>Incomplete</b> (+ remarks and 📷 pictures as evidence). Every <b>Incomplete</b> = <code>DEPT_INCOMPLETE_FINE</code> Rs (or the department's own rate in <code>DEPT_INCOMPLETE_FINES</code>) charged to that <b>company · department</b>. See Monthly Performance → "Department fines" and the Efficiency report (Dept Fine column).<br>
       <span class="muted"><b>Example:</b> 300 tasks due in the month, 270 TRUE, 30 FALSE → efficiency 90% → grade A. Per-task: 30 × Rs 100 = Rs 3,000 (if 10 of the 30 were Accounts with <code>Accounts:200</code> → 20×100 + 10×200 = Rs 4,000). Salary %: 90% falls in 85:2 → 2% of Rs 50,000 = Rs 1,000. Total (BOTH) = Rs 4,000 or Rs 5,000.</span>
     </div></div>
     <form class="panel" id="sf"><h6>Fines, grades &amp; rules</h6>

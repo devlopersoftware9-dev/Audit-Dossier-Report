@@ -101,3 +101,27 @@ a { color: var(--link); }
 
 @media (max-width: 768px) { .stat-card .val { font-size: 21px; } .app-title { font-size: 1.2rem; } }
 .night-note { background: var(--grp-bg); border: 1px solid var(--panel-border); border-left: 4px solid #f59e0b; border-radius: 8px; padding: 7px 12px; font-size: 13px; }
+
+/* ---- Department status + evidence ---- */
+.dept-sel{min-width:120px}
+.dept-sel.is-bad{border-color:#dc3545;background-color:rgba(220,53,69,.15);color:#ffb3ba}
+.dept-sel.is-good{border-color:#198754;background-color:rgba(25,135,84,.15);color:#9be7c0}
+.dept-sel:disabled{opacity:.45}
+.ev-add,.ev-view{white-space:nowrap}
+
+/* ---- Mobile: task rows become cards ---- */
+@media (max-width:768px){
+  .tbl-cards thead{display:none}
+  .tbl-cards,.tbl-cards tbody,.tbl-cards tr,.tbl-cards td{display:block;width:100%}
+  .tbl-cards tr{margin:0 0 .75rem;border:1px solid var(--bs-border-color);border-radius:.6rem;padding:.4rem .6rem;background:var(--panel,transparent)}
+  .tbl-cards tr.grp-row{border:none;padding:.3rem 0;background:none}
+  .tbl-cards td{border:none!important;padding:.3rem 0;display:flex;gap:.6rem;align-items:center;justify-content:space-between;text-align:right}
+  .tbl-cards td::before{content:attr(data-label);font-weight:600;font-size:.8rem;opacity:.7;text-align:left;flex:0 0 38%}
+  .tbl-cards td:not([data-label])::before,.tbl-cards td[data-label=""]::before{content:none}
+  .tbl-cards tr.grp-row td{display:block;text-align:left}
+  .tbl-cards .m-hide{display:none!important}
+  .tbl-cards .m-title{font-size:1rem;font-weight:700;text-align:left;display:block}
+  .tbl-cards .remarks-in{width:100%}
+  .mark-box{width:1.7rem!important;height:1.7rem!important}
+  .dept-sel{flex:1}
+}

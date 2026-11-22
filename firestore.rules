@@ -47,6 +47,15 @@ service cloud.firestore {
       allow delete: if admin() || (active() && resource.data.user_lc == myLc());
     }
 
+    // evidence pictures (compressed JPEG stored in the doc) — officers add their own, only admin deletes
+    match /evidence/{id} {
+      allow read: if admin() || (active() && resource.data.user_lc == myLc());
+      allow create: if admin() || (active() && request.resource.data.user_lc == myLc()
+        && request.resource.data.data is string && request.resource.data.data.size() < 900000);
+      allow update: if admin();
+      allow delete: if admin();
+    }
+
     // date-wise TRUE / FALSE — officers only see and write their own
     match /records/{id} {
       allow read: if admin() || (active() && resource.data.user_lc == myLc());

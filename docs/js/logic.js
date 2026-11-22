@@ -10,6 +10,8 @@ export const DEFAULT_SETTINGS = [
   ['FINE_PER_TASK', '100', 'Rs charged to the USER (auditor) for every scheduled task that ends the day FALSE (not ticked by 11 PM).'],
   ['DEPT_FINES', '', 'Optional: a different Rs per missed task for some departments, e.g. Accounts:200,IT:50. Still charged to the USER — it only changes the rate for tasks of that department. Blank = FINE_PER_TASK for all.'],
   ['FINE_PCT_SLABS', '95:0,85:2,75:5,60:10,0:15', 'Salary cut by monthly efficiency, highest first. 95:0 = 95% or more → 0% · 85:2 = 85–94.9% → 2% · 75:5 → 5% · 60:10 → 10% · 0:15 = below 60% → 15% of the user\'s monthly salary (set salary in Users).'],
+  ['DEPT_INCOMPLETE_FINE', '0', 'Rs charged to the DEPARTMENT for every task the auditor ticked TRUE and marked "Incomplete". 0 = no department fine.'],
+  ['DEPT_INCOMPLETE_FINES', '', 'Optional: a different department-fine rate per department, e.g. Accounts:500,Warehouse:300. Blank = DEPT_INCOMPLETE_FINE for all.'],
   ['GRADE_SLABS', '95:A+,85:A,75:B,60:C,0:D', 'Grade by efficiency: 95% or more = A+, 85% = A, 75% = B, 60% = C, below 60% = D.'],
   ['WEEKLY_OFF', 'Fri', 'Weekly off day — no tasks are due (same as the sheet formula).'],
   ['WORK_ON_OFF_DAY_COMPANIES', 'RCG', 'Companies that still work on the off day (comma separated). RCG tasks are due on Friday too.'],
@@ -174,7 +176,8 @@ export const groupRecordKey = (g, d) => recordKey(d, g.user, g.branch, g.depart,
 
 export function attach(g, recIndex, d) {
   const r = recIndex.get(groupRecordKey(g, d));
-  return { ...g, status: r ? !!r.status : null, remarks: r ? (r.remarks || '') : '', marked_at: r ? (r.timestamp || '') : '', source: r ? r.source : '' };
+  return { ...g, status: r ? !!r.status : null, remarks: r ? (r.remarks || '') : '', marked_at: r ? (r.timestamp || '') : '', source: r ? r.source : '',
+    dept_status: r ? (r.dept_status || '') : '', evidence_ids: r ? (r.evidence_ids || []) : [], by: r ? (r.by || '') : '' };
 }
 export const indexRecords = (recs) => new Map(recs.map((r) => [recordKey(r.date, r.user, r.branch, r.department, r.checklist, r.task_type), r]));
 
@@ -204,11 +207,16 @@ export function stats(rows) {
   return { total: rows.length, done, pending: rows.length - done, pct: rows.length ? Math.round(done * 100 / rows.length) : 0 };
 }
 
-export function makeRecord(g, d, user, status, remarks, source, ts) {
+export const DEPT_STATUSES = ['Complete', 'Incomplete'];
+
+/** dept_status: '' | 'Complete' | 'Incomplete' — only allowed when the auditor's own status is TRUE. */
+export function makeRecord(g, d, user, status, remarks, source, ts, deptStatus = '', evidenceIds = []) {
   return { date: d, user, user_lc: norm(user), company: g.company, branch: g.branch, department: g.depart,
     checklist: g.checklist, todo: g.details.join(', '), task_type: g.task, status: status ? 1 : 0,
-    remarks: (remarks || '').slice(0, 1000), source, timestamp: ts };
+    remarks: (remarks || '').slice(0, 1000), source, timestamp: ts,
+    dept_status: status && DEPT_STATUSES.includes(deptStatus) ? deptStatus : '', evidence_ids: (evidenceIds || []).slice(0, 5) };
 }
+export const isDeptIncomplete = (r) => !!r.status && r.dept_status === 'Incomplete';
 
 /** FALSE records for every task due on day d (for the given users) that has no record. */
 export function missingForDay(groups, recsOfDay, d, opts, activeUsersLc, ts) {
@@ -238,6 +246,7 @@ export function filterRecords(recs, f, userLock = null) {
       if (f[k] && norm(r[col]) !== norm(f[k])) return false;
     }
     if (f.checklist && !norm(r.checklist).includes(norm(f.checklist))) return false;
+    if (f.dept_status && (f.dept_status === 'none' ? !!r.dept_status : r.dept_status !== f.dept_status)) return false;
     return true;
   });
 }
@@ -249,8 +258,14 @@ export function fineCtx(s) {
     const i = p.lastIndexOf(':'); if (i < 0) return;
     const v = Number(p.slice(i + 1)); if (!Number.isNaN(v)) dept[norm(p.slice(0, i))] = v;
   });
+  const deptInc = {};
+  String(s.DEPT_INCOMPLETE_FINES || '').split(',').forEach((p) => {
+    const i = p.lastIndexOf(':'); if (i < 0) return;
+    const v = Number(p.slice(i + 1)); if (!Number.isNaN(v)) deptInc[norm(p.slice(0, i))] = v;
+  });
   return { mode, perTaskOn: mode === 'PER_TASK' || mode === 'BOTH', pctOn: mode === 'PERCENT' || mode === 'BOTH',
-    per: Number(s.FINE_PER_TASK) || 0, dept, slabs: parseSlabs(s.FINE_PCT_SLABS), grades: parseSlabs(s.GRADE_SLABS) };
+    per: Number(s.FINE_PER_TASK) || 0, dept, slabs: parseSlabs(s.FINE_PCT_SLABS), grades: parseSlabs(s.GRADE_SLABS),
+    deptIncRate: Number(s.DEPT_INCOMPLETE_FINE) || 0, deptInc };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -268,8 +283,9 @@ export function efficiency(recs, f, s, salaries = new Map(), userLock = null) {
   for (const r of rows0) {
     const k = KEY_OF[by](r) || '(blank)';
     let g = agg.get(k);
-    if (!g) { g = { key: k, total: 0, done: 0, missed: 0, task_fine: 0 }; agg.set(k, g); }
+    if (!g) { g = { key: k, total: 0, done: 0, missed: 0, task_fine: 0, incomplete: 0, dept_fine: 0 }; agg.set(k, g); }
     g.total++;
+    if (isDeptIncomplete(r)) { g.incomplete++; g.dept_fine += (fc.deptInc[norm(r.department)] ?? fc.deptIncRate); }
     if (r.status) g.done++;
     else { g.missed++; if (fc.perTaskOn) g.task_fine += (fc.dept[norm(r.department)] ?? fc.per); }
   }
@@ -283,8 +299,8 @@ export function efficiency(recs, f, s, salaries = new Map(), userLock = null) {
     return g;
   });
   rows.sort(by === 'date' ? ((a, b) => (a.key < b.key ? -1 : 1)) : ((a, b) => (a.pct - b.pct) || (b.missed - a.missed)));
-  const tot = { total: 0, done: 0, missed: 0, total_fine: 0 };
-  rows.forEach((g) => { tot.total += g.total; tot.done += g.done; tot.missed += g.missed; tot.total_fine += g.total_fine; });
+  const tot = { total: 0, done: 0, missed: 0, total_fine: 0, incomplete: 0, dept_fine: 0 };
+  rows.forEach((g) => { tot.total += g.total; tot.done += g.done; tot.missed += g.missed; tot.total_fine += g.total_fine; tot.incomplete += g.incomplete; tot.dept_fine += g.dept_fine; });
   tot.pct = tot.total ? round1(tot.done * 100 / tot.total) : 0;
   return { rows, totals: tot, group_by: by, mode: fc.mode, show_pct: fc.pctOn && by === 'user' };
 }
@@ -307,7 +323,28 @@ export function monthly(recs, ym, s, salaries = new Map(), user = null) {
       .map((r) => ({ date: r.date, department: r.department, checklist: r.checklist, task_type: r.task_type, remarks: r.remarks }));
     return { ...u, departments, missed_list };
   });
-  return { month: ym, rows, mode: eff.mode };
+  return { month: ym, rows, mode: eff.mode, dept_fines: deptFines(inMonth, s) };
+}
+
+/** Department fines: tasks the auditor checked (TRUE) but marked the department "Incomplete". */
+export function deptFines(recs, s) {
+  const fc = fineCtx(s);
+  const m = new Map();
+  for (const r of recs) {
+    if (norm(r.source) === 'extra') continue;
+    const k = `${r.company} · ${r.department}`;
+    let d = m.get(k);
+    if (!d) { d = { key: k, company: r.company, department: r.department, checked: 0, complete: 0, incomplete: 0, fine: 0, items: [] }; m.set(k, d); }
+    if (!r.status) continue;
+    d.checked++;
+    if (r.dept_status === 'Complete') d.complete++;
+    if (isDeptIncomplete(r)) {
+      d.incomplete++;
+      d.fine += (fc.deptInc[norm(r.department)] ?? fc.deptIncRate);
+      d.items.push({ date: r.date, checklist: r.checklist, task_type: r.task_type, user: r.user, remarks: r.remarks, evidence: (r.evidence_ids || []).length });
+    }
+  }
+  return [...m.values()].filter((d) => d.checked).sort((a, b) => b.fine - a.fine || b.incomplete - a.incomplete);
 }
 
 // ---------- task form ----------
