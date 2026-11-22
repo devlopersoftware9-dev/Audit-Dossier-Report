@@ -952,7 +952,7 @@ async function renderUsers() {
           const self = editing.uid === S.uid;
           if (self && !(await askConfirm(`Set a new password for your own login "${editing.username}"? You will be logged out and must log in again with the new password.`, 'Set password'))) return;
           await createLogin(editing.username, v.password, { must_change: !self });
-          if (self) { log('RESET_OWN_PASSWORD', editing.username); toast('Password changed. Please log in again with the new password.'); await signOut(auth); return; }
+          if (self) { await log('RESET_OWN_PASSWORD', editing.username); toast('Password changed. Please log in again with the new password.'); await signOut(auth); return; }
         }
         log('SAVE_USER', editing.username);
         toast(v.password ? 'User updated and password reset' : 'User updated');
