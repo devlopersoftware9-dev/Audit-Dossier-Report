@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=4';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=4';
+import * as L from './logic.js?v=6';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=6';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -104,8 +104,49 @@ async function fetchRecords(start, end, userLc = null, force = false) {
 const clearCache = () => S.cache.clear();
 
 // ------------------------------------------------------------------ daily jobs (auto FALSE + monthly snapshot)
+// ------------------------------------------------------------------ today's ticks: kept on this computer, saved at night
+// Ticks / remarks of the day are stored in this browser (localStorage). After 12:00 at night (or at the next
+// login on this computer) they are written to the database in one go, then unmarked tasks become FALSE.
+const draftKey = () => `adp_draft_${S.uid}`;
+function getDraft() { try { return JSON.parse(localStorage.getItem(draftKey()) || '{}'); } catch (e) { return {}; } }
+function putDraft(d) { localStorage.setItem(draftKey(), JSON.stringify(d)); }
+const draftKeyOf = (r) => L.recordKey(r.date, r.user, r.branch, r.department, r.checklist, r.task_type);
+function draftFor(date) { return Object.values(getDraft()[date] || {}); }
+function pendingCount(date) { return draftFor(date).length; }
+
+/** Write every finished day's ticks (dates before today) to the database in one batch per day. */
+async function flushDrafts() {
+  const dr = getDraft();
+  const t = today();
+  const dates = Object.keys(dr).filter((d) => d < t).sort();
+  let saved = 0, skipped = 0;
+  for (const d of dates) {
+    const recs = Object.values(dr[d] || {});
+    const existing = recs.length ? await fetchRecords(d, d, S.isAdmin ? null : S.prof.username_lc, true) : [];
+    const locked = new Set(existing.filter((r) => !S.isAdmin && (r.source === 'Auto-Closed' || r.source === 'Admin')).map((r) => r.id));
+    for (let i = 0; i < recs.length; i += 400) {
+      const b = writeBatch(db);
+      let n = 0;
+      for (const r of recs.slice(i, i + 400)) {
+        const id = await recordId(r);
+        if (locked.has(id)) { skipped++; continue; }
+        b.set(doc(db, 'records', id), r);
+        n++;
+      }
+      if (n) await b.commit();
+      saved += n;
+    }
+    delete dr[d];
+    putDraft(dr);
+  }
+  if (dates.length) { clearCache(); log('NIGHT_SAVE', `${dates.join(',')}: ${saved} saved, ${skipped} skipped`); }
+  return { saved, skipped, days: dates.length };
+}
+
 async function closePendingDays() {
-  const yest = L.addDays(today(), -1);
+  // Officers close their own finished days right after their night save. The admin closes officers' days
+  // one day later, so an officer whose computer was off at midnight can still save his ticks the next morning.
+  const yest = L.addDays(today(), S.isAdmin ? -2 : -1);
   const ts = nowText();
   const people = S.isAdmin ? S.users.filter((u) => u.active && u.role !== 'Admin') : [{ ...S.prof, uid: S.uid }];
   const due = people.filter((u) => (u.closed_until || '') < yest);
@@ -173,7 +214,11 @@ function shell(active, inner) {
 function mount(active, inner) {
   S.seq++;
   $('app').innerHTML = shell(active, inner);
-  $('btnLogout').onclick = () => signOut(auth);
+  $('btnLogout').onclick = () => {
+    const n = S.uid ? pendingCount(today()) : 0;
+    if (n && !confirm(`${n} tick(s) of today are kept on this computer and will be saved tonight when you open the portal here again (or if it stays open). Logout anyway?`)) return;
+    signOut(auth);
+  };
   $('btnTheme').onclick = () => {
     const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.bsTheme = next;
@@ -256,7 +301,9 @@ async function renderTasks(q) {
   const tab = q.tab || 'today', val = q.v || '';
   const viewLc = S.isAdmin ? L.norm(q.user || '') : S.prof.username_lc;
   const t = today();
-  const recsToday = await fetchRecords(t, t, viewLc || null, true);
+  const dbToday = await fetchRecords(t, t, viewLc || null, true);
+  const mine = new Map(draftFor(t).map((r) => [draftKeyOf(r), r]));
+  const recsToday = [...dbToday.filter((r) => !mine.has(draftKeyOf(r))), ...mine.values()];
   const who = viewLc ? S.groups.find((g) => L.norm(g.user) === viewLc)?.user || q.user || S.prof.username : null;
   let rows = tab === 'today' ? L.todayTasks(S.groups, recsToday, t, opts(), who)
     : L.categoryTasks(S.groups, recsToday, t, opts(), tab, val, who);
@@ -293,6 +340,7 @@ async function renderTasks(q) {
   });
   const card = (cls, lbl, v, id = '') => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val" ${id ? `id="${id}"` : ''}>${v}</div></div></div>`;
   $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-blue', 'Total Tasks (Today)', st.total, 'cTotal')}${card('bg-teal', 'Completed', st.done, 'cDone')}${card('bg-amber', 'Pending', st.pending, 'cPending')}${card('bg-green', 'Completion Progress', st.pct + '%', 'cPct')}${card('bg-slate', 'This Month Efficiency', mtd)}${card('bg-red', 'This Month Fine (Rs)', fine)}</div>
+    <div class="night-note mb-2">📝 Your ticks and remarks are kept on <b>this computer</b> (<span id="pendBox">${pendingCount(t)}</span> today) and are saved to the database <b>tonight at 12:00</b> in one go. Unmarked tasks then become FALSE and the page loads the new day. Please use the same computer and browser all day.</div>
     <div class="d-flex flex-wrap justify-content-between align-items-start">
       <div class="pill-bar">${pill('today', '', 'Todays Task', 'success')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
       <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active).map((u) => u.username), q.user || '')}</select>` : ''}
@@ -329,11 +377,15 @@ async function renderTasks(q) {
       const due = L.isScheduled(r, t, opts());
       const source = S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
       const rec = L.makeRecord(r, t, r.user, box.checked, rem.value, source, nowText());
-      await setDoc(doc(db, 'records', await recordId(rec)), rec);
+      const dr = getDraft();
+      dr[t] = dr[t] || {};
+      dr[t][draftKeyOf(rec)] = rec;
+      putDraft(dr);
       r.status = box.checked; r.remarks = rem.value;
       tr.classList.toggle('row-done', box.checked);
-      box.title = 'Saved ' + rec.timestamp;
-      toast((box.checked ? '✔ TRUE' : '✖ FALSE') + ' saved' + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
+      box.title = 'Kept on this computer at ' + rec.timestamp + ' — saved to the database tonight';
+      if ($('pendBox')) $('pendBox').textContent = pendingCount(t);
+      toast((box.checked ? '✔ TRUE' : '✖ FALSE') + ' noted — will be saved tonight at 12:00' + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
       if (tab === 'today') {
         const s2 = L.stats(rows);
         $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
@@ -861,9 +913,10 @@ async function checkNewDay() {
     S.day = t;
     clearCache();
     await Promise.all([loadSettings(), loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
+    const f = await flushDrafts();
     const n = await closePendingDays();
     await autoMonthly().catch(() => {});
-    toast(`New day ${t} (${L.dayName(t)}) — today's tasks loaded${n ? `, ${n} unmarked task(s) of yesterday saved as FALSE` : ''}`, 'info');
+    toast(`New day ${t} (${L.dayName(t)}) — ${f.saved} tick(s) saved to the database${n ? `, ${n} unmarked task(s) saved as FALSE` : ''}. Today's tasks loaded.`, 'info');
     route();
   } catch (e) { console.warn('new day', e); } finally { S.rolling = false; }
 }
@@ -880,7 +933,11 @@ async function boot(user) {
     if (!S.isAdmin) S.users = [{ uid: S.uid, ...S.prof }];
     updateDoc(doc(db, 'users', S.uid), { last_login: nowText() }).catch(() => {});
     document.title = S.settings.APP_TITLE;
-    try { const n = await closePendingDays(); if (n) toast(`${n} unmarked task(s) from previous days saved as FALSE`, 'secondary'); } catch (e) { console.warn('auto-close', e); }
+    try {
+      const f = await flushDrafts();
+      const n = await closePendingDays();
+      if (f.saved || n) toast(`Saved ${f.saved} tick(s) from previous day(s)${n ? `, ${n} unmarked task(s) saved as FALSE` : ''}${f.skipped ? ` (${f.skipped} already closed by admin)` : ''}`, 'info');
+    } catch (e) { console.warn('night save / auto-close', e); }
     try { await autoMonthly(); } catch (e) { console.warn('monthly', e); }
     S.day = today();
     route();

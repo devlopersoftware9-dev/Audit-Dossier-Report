@@ -100,3 +100,4 @@ a { color: var(--link); }
 [data-bs-theme="dark"] .badge.text-bg-light { background: #1f2b44 !important; color: #e2e8f0 !important; border-color: #2a3a58 !important; }
 
 @media (max-width: 768px) { .stat-card .val { font-size: 21px; } .app-title { font-size: 1.2rem; } }
+.night-note { background: var(--grp-bg); border: 1px solid var(--panel-border); border-left: 4px solid #f59e0b; border-radius: 8px; padding: 7px 12px; font-size: 13px; }
