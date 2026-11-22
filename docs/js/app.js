@@ -707,7 +707,7 @@ async function importWorkbook(file, replace) {
     }
     await loadUsers();
     const yest = L.addDays(today(), -1);
-    const closed = res.lastDate && res.lastDate < yest ? res.lastDate : yest;
+    const closed = yest;   // tracking starts from the import day (days after the export are unknown)
     for (const name of res.users) {
       const u = S.users.find((x) => x.username_lc === L.norm(name) && !x.replaced_by);
       if (u) { await updateDoc(doc(db, 'users', u.uid), { closed_until: closed }); say(`User ${name} already has a login`); continue; }
