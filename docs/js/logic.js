@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = [
   ['WORK_ON_OFF_DAY_COMPANIES', 'RCG', 'Companies that still work on the off day (comma separated)'],
   ['HIDE_BRANCH_TABS', 'RC', 'Branches without their own "Branch:" tab (comma separated)'],
   ['UTC_OFFSET_HOURS', '5', 'Time zone (Pakistan = 5)'],
+  ['DAY_CLOSE_HOUR', '23', 'Hour the day closes (23 = 11 PM): ticks saved to the database, unmarked = FALSE, next day starts'],
 ];
 
 export const norm = (v) => (v == null ? '' : String(v)).trim().toLowerCase();

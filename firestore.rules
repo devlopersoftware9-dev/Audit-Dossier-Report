@@ -39,6 +39,14 @@ service cloud.firestore {
     match /monthly/{id}  { allow read: if active(); allow write: if admin(); }
     match /logs/{id}     { allow create: if active(); allow read: if admin(); }
 
+    // today's ticks, shared live by everyone using the same login; moved to /records when the day closes
+    match /marks/{id} {
+      allow read: if admin() || (active() && resource.data.user_lc == myLc());
+      allow create, update: if admin()
+        || (active() && request.resource.data.user_lc == myLc() && request.resource.data.source in ['Portal', 'Extra']);
+      allow delete: if admin() || (active() && resource.data.user_lc == myLc());
+    }
+
     // date-wise TRUE / FALSE — officers only see and write their own
     match /records/{id} {
       allow read: if admin() || (active() && resource.data.user_lc == myLc());

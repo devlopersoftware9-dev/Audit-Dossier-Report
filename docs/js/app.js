@@ -5,10 +5,10 @@ import {
   updatePassword, EmailAuthProvider, reauthenticateWithCredential,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc,
+  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=6';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=6';
+import * as L from './logic.js?v=7';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=7';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -20,7 +20,9 @@ const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => Math.round(Number(v) || 0).toLocaleString('en-PK');
 const tz = () => L.tzOffset(S.settings);
-const today = () => L.todayKey(tz());
+// Work day closes at DAY_CLOSE_HOUR (default 23 = 11 PM): after that the portal is already on the next day.
+const closeShift = () => { const h = Number(S.settings.DAY_CLOSE_HOUR); return h > 0 && h < 24 ? 24 - h : 0; };
+const today = () => L.todayKey(tz() + closeShift());
 const nowText = () => L.nowText(tz());
 const opts = () => L.schedOpts(S.settings);
 const slug = (lc) => lc.replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'user';
@@ -104,49 +106,69 @@ async function fetchRecords(start, end, userLc = null, force = false) {
 const clearCache = () => S.cache.clear();
 
 // ------------------------------------------------------------------ daily jobs (auto FALSE + monthly snapshot)
-// ------------------------------------------------------------------ today's ticks: kept on this computer, saved at night
-// Ticks / remarks of the day are stored in this browser (localStorage). After 12:00 at night (or at the next
-// login on this computer) they are written to the database in one go, then unmarked tasks become FALSE.
-const draftKey = () => `adp_draft_${S.uid}`;
-function getDraft() { try { return JSON.parse(localStorage.getItem(draftKey()) || '{}'); } catch (e) { return {}; } }
-function putDraft(d) { localStorage.setItem(draftKey(), JSON.stringify(d)); }
-const draftKeyOf = (r) => L.recordKey(r.date, r.user, r.branch, r.department, r.checklist, r.task_type);
-function draftFor(date) { return Object.values(getDraft()[date] || {}); }
-function pendingCount(date) { return draftFor(date).length; }
+// ------------------------------------------------------------------ today's ticks (shared live) -> database at 11 PM
+// Like the old Google Sheet: ticks/remarks go to the shared "marks" list at once, so everybody using the same
+// login on any computer sees them live. When the day closes (11 PM) every finished day's marks are copied into
+// the "records" database in one go and cleared; tasks with no tick become FALSE; open pages reload.
+const markKeyOf = (r) => L.recordKey(r.date, r.user, r.branch, r.department, r.checklist, r.task_type);
+const marksQuery = (cons) => query(collection(db, 'marks'), ...cons);
 
-/** Write every finished day's ticks (dates before today) to the database in one batch per day. */
-async function flushDrafts() {
-  const dr = getDraft();
+async function fetchMarks(date, userLc) {
+  const cons = [where('date', '==', date)];
+  if (userLc) cons.push(where('user_lc', '==', userLc));
+  const snap = await getDocs(marksQuery(cons));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+/** Copy all marks of finished days (date < today) into records, then delete those marks. */
+async function saveMarksToDatabase() {
   const t = today();
-  const dates = Object.keys(dr).filter((d) => d < t).sort();
+  const snap = await getDocs(marksQuery(S.isAdmin ? [where('date', '<', t)] : [where('user_lc', '==', S.prof.username_lc)]));
+  const marks = snap.docs.map((d) => ({ ref: d.ref, id: d.id, ...d.data() })).filter((m) => m.date < t);
   let saved = 0, skipped = 0;
-  for (const d of dates) {
-    const recs = Object.values(dr[d] || {});
-    const existing = recs.length ? await fetchRecords(d, d, S.isAdmin ? null : S.prof.username_lc, true) : [];
+  const days = [...new Set(marks.map((m) => m.date))].sort();
+  for (const d of days) {
+    const list = marks.filter((m) => m.date === d);
+    const existing = await fetchRecords(d, d, S.isAdmin ? null : S.prof.username_lc, true);
     const locked = new Set(existing.filter((r) => !S.isAdmin && (r.source === 'Auto-Closed' || r.source === 'Admin')).map((r) => r.id));
-    for (let i = 0; i < recs.length; i += 400) {
+    for (let i = 0; i < list.length; i += 200) {
       const b = writeBatch(db);
-      let n = 0;
-      for (const r of recs.slice(i, i + 400)) {
-        const id = await recordId(r);
-        if (locked.has(id)) { skipped++; continue; }
-        b.set(doc(db, 'records', id), r);
-        n++;
+      for (const m of list.slice(i, i + 200)) {
+        const { ref, id, ...rec } = m;
+        if (!S.isAdmin && rec.source === 'Admin') continue;   // ticks made by the admin are saved from the admin's login
+        if (locked.has(id)) skipped++; else { b.set(doc(db, 'records', id), rec); saved++; }
+        b.delete(ref);
       }
-      if (n) await b.commit();
-      saved += n;
+      await b.commit();
     }
-    delete dr[d];
-    putDraft(dr);
   }
-  if (dates.length) { clearCache(); log('NIGHT_SAVE', `${dates.join(',')}: ${saved} saved, ${skipped} skipped`); }
-  return { saved, skipped, days: dates.length };
+  if (days.length) { clearCache(); log('DAY_SAVE', `${days.join(',')}: ${saved} saved, ${skipped} skipped`); }
+  return { saved, skipped, days: days.length };
+}
+
+/** Old version kept ticks in this browser — move any left-overs into the shared marks list once. */
+async function migrateLocalDrafts() {
+  const k = `adp_draft_${S.uid}`;
+  let dr = null;
+  try { dr = JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { dr = null; }
+  if (!dr) return;
+  for (const recs of Object.values(dr)) {
+    for (const r of Object.values(recs || {})) await setDoc(doc(db, 'marks', await recordId(r)), r).catch(() => {});
+  }
+  localStorage.removeItem(k);
+}
+
+/** Close finished days: marks -> records, unmarked -> FALSE, monthly snapshot. Safe to run from many PCs. */
+async function closeDay() {
+  await migrateLocalDrafts();
+  const f = await saveMarksToDatabase();
+  const n = await closePendingDays();
+  await autoMonthly().catch(() => {});
+  return { saved: f.saved, skipped: f.skipped, falses: n };
 }
 
 async function closePendingDays() {
-  // Officers close their own finished days right after their night save. The admin closes officers' days
-  // one day later, so an officer whose computer was off at midnight can still save his ticks the next morning.
-  const yest = L.addDays(today(), S.isAdmin ? -2 : -1);
+  const yest = L.addDays(today(), -1);
   const ts = nowText();
   const people = S.isAdmin ? S.users.filter((u) => u.active && u.role !== 'Admin') : [{ ...S.prof, uid: S.uid }];
   const due = people.filter((u) => (u.closed_until || '') < yest);
@@ -213,12 +235,9 @@ function shell(active, inner) {
 }
 function mount(active, inner) {
   S.seq++;
+  if (S.unsub) { S.unsub(); S.unsub = null; }
   $('app').innerHTML = shell(active, inner);
-  $('btnLogout').onclick = () => {
-    const n = S.uid ? pendingCount(today()) : 0;
-    if (n && !confirm(`${n} tick(s) of today are kept on this computer and will be saved tonight when you open the portal here again (or if it stays open). Logout anyway?`)) return;
-    signOut(auth);
-  };
+  $('btnLogout').onclick = () => { if (S.unsub) { S.unsub(); S.unsub = null; } signOut(auth); };
   $('btnTheme').onclick = () => {
     const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.bsTheme = next;
@@ -301,9 +320,9 @@ async function renderTasks(q) {
   const tab = q.tab || 'today', val = q.v || '';
   const viewLc = S.isAdmin ? L.norm(q.user || '') : S.prof.username_lc;
   const t = today();
-  const dbToday = await fetchRecords(t, t, viewLc || null, true);
-  const mine = new Map(draftFor(t).map((r) => [draftKeyOf(r), r]));
-  const recsToday = [...dbToday.filter((r) => !mine.has(draftKeyOf(r))), ...mine.values()];
+  const [dbToday, marks] = await Promise.all([fetchRecords(t, t, viewLc || null, true), fetchMarks(t, viewLc || null)]);
+  const mk = new Map(marks.map((r) => [markKeyOf(r), r]));
+  const recsToday = [...dbToday.filter((r) => !mk.has(markKeyOf(r))), ...mk.values()];
   const who = viewLc ? S.groups.find((g) => L.norm(g.user) === viewLc)?.user || q.user || S.prof.username : null;
   let rows = tab === 'today' ? L.todayTasks(S.groups, recsToday, t, opts(), who)
     : L.categoryTasks(S.groups, recsToday, t, opts(), tab, val, who);
@@ -340,7 +359,7 @@ async function renderTasks(q) {
   });
   const card = (cls, lbl, v, id = '') => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val" ${id ? `id="${id}"` : ''}>${v}</div></div></div>`;
   $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-blue', 'Total Tasks (Today)', st.total, 'cTotal')}${card('bg-teal', 'Completed', st.done, 'cDone')}${card('bg-amber', 'Pending', st.pending, 'cPending')}${card('bg-green', 'Completion Progress', st.pct + '%', 'cPct')}${card('bg-slate', 'This Month Efficiency', mtd)}${card('bg-red', 'This Month Fine (Rs)', fine)}</div>
-    <div class="night-note mb-2">📝 Your ticks and remarks are kept on <b>this computer</b> (<span id="pendBox">${pendingCount(t)}</span> today) and are saved to the database <b>tonight at 12:00</b> in one go. Unmarked tasks then become FALSE and the page loads the new day. Please use the same computer and browser all day.</div>
+    <div class="night-note mb-2">🔄 Ticks are shared live on every computer using this login (<b><span id="pendBox">${marks.length}</span></b> ticked today). At <b>${esc(closeLabel())}</b> the day is saved to the database in one go, unmarked tasks become FALSE and the page loads the next day's tasks.</div>
     <div class="d-flex flex-wrap justify-content-between align-items-start">
       <div class="pill-bar">${pill('today', '', 'Todays Task', 'success')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
       <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active).map((u) => u.username), q.user || '')}</select>` : ''}
@@ -377,15 +396,12 @@ async function renderTasks(q) {
       const due = L.isScheduled(r, t, opts());
       const source = S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
       const rec = L.makeRecord(r, t, r.user, box.checked, rem.value, source, nowText());
-      const dr = getDraft();
-      dr[t] = dr[t] || {};
-      dr[t][draftKeyOf(rec)] = rec;
-      putDraft(dr);
+      rec.by = S.prof.username;
+      await setDoc(doc(db, 'marks', await recordId(rec)), rec);
       r.status = box.checked; r.remarks = rem.value;
       tr.classList.toggle('row-done', box.checked);
-      box.title = 'Kept on this computer at ' + rec.timestamp + ' — saved to the database tonight';
-      if ($('pendBox')) $('pendBox').textContent = pendingCount(t);
-      toast((box.checked ? '✔ TRUE' : '✖ FALSE') + ' noted — will be saved tonight at 12:00' + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
+      box.title = 'Ticked ' + rec.timestamp + ' — saved to the database at ' + closeLabel();
+      toast((box.checked ? '✔ TRUE' : '✖ FALSE') + ` noted — goes to the database at ${closeLabel()}` + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
       if (tab === 'today') {
         const s2 = L.stats(rows);
         $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
@@ -393,7 +409,32 @@ async function renderTasks(q) {
       clearCache();
     } catch (e) { if (fromBox) box.checked = !box.checked; fail(e); } finally { tr.classList.remove('saving'); }
   };
+  // live: ticks made on other computers appear here within a second
+  const cons = [where('date', '==', t)];
+  if (viewLc) cons.push(where('user_lc', '==', viewLc));
+  S.unsub = onSnapshot(marksQuery(cons), (snap) => {
+    if (my !== S.seq) return;
+    const live = new Map(snap.docs.map((d) => { const x = d.data(); return [markKeyOf(x), x]; }));
+    rows.forEach((r, i) => {
+      const m = live.get(L.groupRecordKey(r, t));
+      if (!m) return;
+      const tr = main.querySelector(`tr[data-i="${i}"]`);
+      if (!tr) return;
+      const box = tr.querySelector('.mark-box'), rem = tr.querySelector('.remarks-in');
+      r.status = !!m.status; r.remarks = m.remarks || '';
+      box.checked = r.status;
+      if (document.activeElement !== rem) rem.value = r.remarks;
+      tr.classList.toggle('row-done', r.status);
+      box.title = `Ticked ${m.timestamp}${m.by ? ' by ' + m.by : ''}`;
+    });
+    if ($('pendBox')) $('pendBox').textContent = snap.size;
+    if (tab === 'today' && $('cDone')) {
+      const s2 = L.stats(rows);
+      $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
+    }
+  }, (e) => console.warn('live', e));
 }
+const closeLabel = () => { const h = Number(S.settings.DAY_CLOSE_HOUR); return h > 0 && h < 24 ? `${h > 12 ? h - 12 : h}:00 ${h >= 12 ? 'PM' : 'AM'}` : '12:00 midnight'; };
 
 // ------------------------------------------------------------------ reports
 function filterBar(f, extra = '') {
@@ -913,10 +954,9 @@ async function checkNewDay() {
     S.day = t;
     clearCache();
     await Promise.all([loadSettings(), loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
-    const f = await flushDrafts();
-    const n = await closePendingDays();
-    await autoMonthly().catch(() => {});
-    toast(`New day ${t} (${L.dayName(t)}) — ${f.saved} tick(s) saved to the database${n ? `, ${n} unmarked task(s) saved as FALSE` : ''}. Today's tasks loaded.`, 'info');
+    await new Promise((res) => setTimeout(res, Math.random() * 20000));   // spread the load when many PCs are open
+    const c = await closeDay();
+    toast(`Day closed: ${c.saved} tick(s) saved to the database${c.falses ? `, ${c.falses} unmarked task(s) as FALSE` : ''}. Tasks of ${t} (${L.dayName(t)}) loaded.`, 'info');
     route();
   } catch (e) { console.warn('new day', e); } finally { S.rolling = false; }
 }
@@ -934,11 +974,9 @@ async function boot(user) {
     updateDoc(doc(db, 'users', S.uid), { last_login: nowText() }).catch(() => {});
     document.title = S.settings.APP_TITLE;
     try {
-      const f = await flushDrafts();
-      const n = await closePendingDays();
-      if (f.saved || n) toast(`Saved ${f.saved} tick(s) from previous day(s)${n ? `, ${n} unmarked task(s) saved as FALSE` : ''}${f.skipped ? ` (${f.skipped} already closed by admin)` : ''}`, 'info');
-    } catch (e) { console.warn('night save / auto-close', e); }
-    try { await autoMonthly(); } catch (e) { console.warn('monthly', e); }
+      const c = await closeDay();
+      if (c.saved || c.falses) toast(`Previous day saved to the database: ${c.saved} tick(s)${c.falses ? `, ${c.falses} unmarked task(s) as FALSE` : ''}`, 'info');
+    } catch (e) { console.warn('day close', e); }
     S.day = today();
     route();
   } catch (e) { fail(e); renderLogin(friendly(e)); }

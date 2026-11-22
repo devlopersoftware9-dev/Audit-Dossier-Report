@@ -68,6 +68,8 @@ or run `python import_excel.py "Audit Dossier Web.xlsx" --replace` from the comm
 - Security rules are in `firestore.rules` (pasted into Firebase console → Firestore → Rules).
 - The first time the site opens, it shows **First-time setup** so you can create the Admin login. After that, go to **Settings → Import** and upload the Google Sheet (.xlsx).
 - Officer logins are created by the import (default password `Audit@123`) or under **Users**. Everyone must set their own password at first login.
-- Missed tasks become FALSE automatically the next time anyone logs in. The admin's login closes every officer's pending days.
+- **Ticks work like the old sheet's checkboxes.** They are shared live, so the same login can be used on several computers and everyone sees the same ticks.
+- **At 11 PM the day closes** (setting `DAY_CLOSE_HOUR`). The day's ticks are copied into the database (`records`) in one go and cleared. Tasks with no tick become FALSE, and every open page reloads with the next day's tasks.
+- **If no page is open at 11 PM**, the same day-close runs the next time anyone logs in. Nothing is lost, because the ticks are already stored online.
 
 The Python version (`app.py`, `run.bat`) is still here for running on an office PC without internet.
