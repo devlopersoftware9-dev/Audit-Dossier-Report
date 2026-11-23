@@ -541,3 +541,18 @@ export function nextDueDates(t, fromKey, opts, count = 5, days = 400) {
   for (let i = 0, d = fromKey; i < days && out.length < count; i++, d = addDays(d, 1)) if (isScheduled(t, d, opts)) out.push(d);
   return out;
 }
+
+// ---------- task change log ----------
+export const TASK_LABELS = {
+  depart: 'Department', checklist: 'Check List', checklist_url: 'Check list link', detail: 'Detail', task: 'Task', user: 'User (1st)',
+  audit_type: 'Triggered / Daily', recurrence: 'Recurrence', target: 'Target Day / Date', target_month: 'Target Month',
+  start_time: 'Start Time', end_time: 'End Time', company: 'Company', branch: 'Branch', sop_name: 'SOP name', sop_url: 'SOP link',
+  ordered_by: 'Ordered By', remarks: 'Remarks', hidden: 'Hidden',
+};
+/** Field-by-field difference between a task before and after a change: [{field, label, from, to}]. */
+export function taskDiff(before = {}, after = {}) {
+  const keys = [...new Set([...TASK_FIELDS, 'hidden'])];
+  const show = (k, v) => (k === 'hidden' ? (v ? 'Yes' : 'No') : String(v ?? '').trim());
+  return keys.filter((k) => k in after).map((k) => ({ field: k, label: TASK_LABELS[k] || k, from: show(k, before[k]), to: show(k, after[k]) }))
+    .filter((d) => d.from !== d.to);
+}

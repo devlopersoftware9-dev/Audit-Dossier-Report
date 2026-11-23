@@ -5,10 +5,10 @@ import {
   updatePassword, EmailAuthProvider, reauthenticateWithCredential,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot,
+  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=13';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=13';
+import * as L from './logic.js?v=14';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=14';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -248,7 +248,7 @@ function shell(active, inner) {
     </div>
     <ul class="nav nav-tabs mb-2">
       ${tab('tasks', 'Tasks Portal', 'tasks')}${tab('report', 'Reporting', 'report')}${tab('eff', 'Efficiency &amp; Fines', 'eff')}${tab('monthly', 'Monthly Performance', 'monthly')}
-      ${S.isAdmin ? tab('admin', 'Task Manager', 'admin/tasks') + tab('users', 'Users', 'users') + tab('settings', 'Settings', 'settings') : ''}
+      ${S.isAdmin ? tab('admin', 'Task Manager', 'admin/tasks') + tab('users', 'Users', 'users') + tab('settings', 'Settings', 'settings') : tab('admin', 'My Tasks', 'admin/tasks')}
     </ul>
     <div id="main">${inner}</div></div>`;
 }
@@ -677,7 +677,9 @@ function renderAdminTasks(q) {
   const show = q.show || 'active';
   const t = today();
   const Ls = L.listings(S.tasks, S.users.map((u) => u.username));
+  const mine = (x) => S.isAdmin || x.user_lc === S.prof.username_lc;
   const list = [...S.tasks].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)).filter((x) => {
+    if (!mine(x) || (!S.isAdmin && x.hidden)) return false;
     const due = L.isScheduled(x, t, opts());
     if (show === 'active' && x.hidden) return false;
     if (show === 'hidden' && !x.hidden) return false;
@@ -689,24 +691,25 @@ function renderAdminTasks(q) {
     return true;
   });
   mount('admin', `<div class="panel"><form id="tf" class="d-flex flex-wrap gap-2 align-items-center">
-      <a class="btn btn-primary btn-sm" href="#/admin/task">＋ Add New Task</a>
+      <a class="btn btn-primary btn-sm" href="#/admin/task">＋ Add New Task</a> <a class="btn btn-outline-info btn-sm" href="#/admin/log">📜 Change log</a>
       <input name="q" value="${esc(q.q || '')}" class="form-control form-control-sm" style="max-width:240px" placeholder="Search check list / detail / user / SOP…">
       <select name="dept" class="form-select form-select-sm" style="width:auto">${opt(Ls.depart, q.dept || '', 'All departments')}</select>
       <select name="branch" class="form-select form-select-sm" style="width:auto">${opt(Ls.branch, q.branch || '', 'All branches')}</select>
-      <select name="user" class="form-select form-select-sm" style="width:auto">${opt(Ls.user, q.user || '', 'All users')}</select>
-      <select name="show" class="form-select form-select-sm" style="width:auto">${[['active', 'Active tasks'], ['hidden', 'Hidden tasks'], ['today', 'Due today (Y)'], ['all', 'All']].map(([v, l]) => `<option value="${v}" ${show === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-      <button class="btn btn-outline-primary btn-sm">Filter</button><span class="muted small">${list.length} of ${S.tasks.length} rows</span></form>
+      ${S.isAdmin ? `<select name="user" class="form-select form-select-sm" style="width:auto">${opt(Ls.user, q.user || '', 'All users')}</select>` : ''}
+      <select name="show" class="form-select form-select-sm" style="width:auto">${(S.isAdmin ? [['active', 'Active tasks'], ['hidden', 'Hidden tasks'], ['today', 'Due today (Y)'], ['all', 'All']] : [['active', 'All my tasks'], ['today', 'Due today (Y)']]).map(([v, l]) => `<option value="${v}" ${show === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn btn-outline-primary btn-sm">Filter</button><span class="muted small">${list.length} of ${S.tasks.filter(mine).length} rows</span></form>
       <div class="small muted mt-1">One row = one check-list point. Rows with the same Check List, Task, Branch and User show as one line in the portal. Use <b>＋ Point</b> to add another point to the same check list.</div></div>
-    <div class="panel"><div class="d-flex gap-2 mb-2"><button class="btn btn-sm btn-outline-warning" data-act="hide">Hide selected</button><button class="btn btn-sm btn-outline-success" data-act="unhide">Unhide selected</button><button class="btn btn-sm btn-outline-danger" data-act="delete">Delete selected</button></div>
-    <div class="table-wrap"><table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th><input type="checkbox" id="selAll" class="form-check-input"></th><th>Today</th><th>Depart</th><th>Check List</th><th>Detail</th><th>Task</th><th>User</th><th>Recurrence</th><th>Target</th><th>Company</th><th>Branch</th><th>SOP</th><th>Status</th><th style="min-width:120px"></th></tr></thead><tbody>
-    ${list.slice(0, 2000).map((x) => `<tr class="${x.hidden ? 'hidden-row' : ''}"><td><input type="checkbox" class="form-check-input sel" value="${x.id}"></td><td>${L.isScheduled(x, t, opts()) && !x.hidden ? '<span class="badge bg-primary">Y</span>' : 'N'}</td>
+    ${S.isAdmin ? '' : '<div class="small muted mb-1 px-1">You can add your own tasks and change Recurrence, Target, SOP etc. Every change is saved in the 📜 Change log (old → new). Only the admin can hide or delete a task.</div>'}
+    <div class="panel">${S.isAdmin ? '<div class="d-flex gap-2 mb-2"><button class="btn btn-sm btn-outline-warning" data-act="hide">Hide selected</button><button class="btn btn-sm btn-outline-success" data-act="unhide">Unhide selected</button><button class="btn btn-sm btn-outline-danger" data-act="delete">Delete selected</button></div>' : ''}
+    <div class="table-wrap"><table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr>${S.isAdmin ? '<th><input type="checkbox" id="selAll" class="form-check-input"></th>' : ''}<th>Today</th><th>Depart</th><th>Check List</th><th>Detail</th><th>Task</th><th>User</th><th>Recurrence</th><th>Target</th><th>Company</th><th>Branch</th><th>SOP</th><th>Status</th><th style="min-width:120px"></th></tr></thead><tbody>
+    ${list.slice(0, 2000).map((x) => `<tr class="${x.hidden ? 'hidden-row' : ''}">${S.isAdmin ? `<td><input type="checkbox" class="form-check-input sel" value="${x.id}"></td>` : ''}<td>${L.isScheduled(x, t, opts()) && !x.hidden ? '<span class="badge bg-primary">Y</span>' : 'N'}</td>
       <td>${esc(x.depart)}</td><td>${esc(x.checklist)}</td><td class="small">${esc(x.detail)}</td><td>${esc(x.task)}</td><td>${esc(x.user)}</td><td>${esc(x.recurrence)}</td><td>${esc(x.target)}${x.target_month ? ' / M' + esc(x.target_month) : ''}</td><td>${esc(x.company)}</td><td>${esc(x.branch)}</td>
       <td>${x.sop_url ? `<a href="${esc(x.sop_url)}" target="_blank" rel="noopener">${esc(x.sop_name || 'Link')}</a>` : esc(x.sop_name)}</td>
       <td>${x.hidden ? '<span class="badge bg-secondary">Hidden</span>' : '<span class="badge bg-success">Active</span>'}</td>
       <td class="text-nowrap"><a class="btn btn-sm btn-outline-primary py-0" href="#/admin/task?id=${x.id}">Edit</a> <a class="btn btn-sm btn-outline-secondary py-0" href="#/admin/task?copy=${x.id}" title="Add another point to this check list">＋ Point</a></td></tr>`).join('')}
     </tbody></table></div></div>`);
   $('tf').onsubmit = (ev) => { ev.preventDefault(); go('admin/tasks', readForm(ev.target)); };
-  $('selAll').onchange = (e) => document.querySelectorAll('.sel').forEach((c) => { c.checked = e.target.checked; });
+  if ($('selAll')) $('selAll').onchange = (e) => document.querySelectorAll('.sel').forEach((c) => { c.checked = e.target.checked; });
   document.querySelectorAll('[data-act]').forEach((b) => {
     b.onclick = async () => {
       const ids = [...document.querySelectorAll('.sel:checked')].map((c) => c.value);
@@ -718,6 +721,14 @@ function renderAdminTasks(q) {
         ids.forEach((id) => (act === 'delete' ? bt.delete(doc(db, 'tasks', id)) : bt.update(doc(db, 'tasks', id), { hidden: act === 'hide' })));
         await bt.commit();
         log(act.toUpperCase() + '_TASK', ids.join(','));
+        const ts = nowText();
+        const lb = writeBatch(db);
+        ids.forEach((id) => {
+          const x = S.tasks.find((k) => k.id === id) || {};
+          lb.set(doc(collection(db, 'task_log')), logEntry(x, act === 'delete' ? 'DELETE' : act === 'hide' ? 'HIDE' : 'UNHIDE', id, ts,
+            act === 'delete' ? [] : [{ field: 'hidden', label: 'Hidden', from: act === 'hide' ? 'No' : 'Yes', to: act === 'hide' ? 'Yes' : 'No' }]));
+        });
+        await lb.commit().catch(() => {});
         await loadTasks();
         toast(`${ids.length} row(s): ${act}`);
         renderAdminTasks(q);
@@ -726,11 +737,15 @@ function renderAdminTasks(q) {
   });
 }
 
-function renderTaskForm(q) {
+async function renderTaskForm(q) {
+  const own = (x) => x && (S.isAdmin || x.user_lc === S.prof.username_lc);
   const edit = q.id ? S.tasks.find((x) => x.id === q.id) : null;
+  if (q.id && (!edit || !own(edit) || (!S.isAdmin && edit.hidden))) { toast('You can only change your own tasks.', 'warning'); return go('admin/tasks'); }
   const src = edit || (q.copy ? S.tasks.find((x) => x.id === q.copy) : null);
   const t = src ? { ...src, detail: edit ? src.detail : '' } : { company: 'RC', branch: 'RC', recurrence: 'Daily', target: 'Daily', audit_type: 'Post-Audit' };
+  if (!S.isAdmin) t.user = S.prof.username;   // an officer's tasks are always his own
   const Ls = L.listings(S.tasks, S.users.filter((u) => !u.replaced_by).map((u) => u.username));
+  if (!S.isAdmin) Ls.user = [S.prof.username];
   const lab = (label, req) => `<label class="form-label small fw-semibold">${label}${req ? ' <span class="text-danger">*</span>' : ''}</label>`;
   // text box
   const field = (name, label, cols = 3, type = 'text', req = false, ph = '', list = '') => `<div class="col-md-${cols}">${lab(label, req)}
@@ -769,12 +784,22 @@ function renderTaskForm(q) {
       ${field('ordered_by', 'Ordered By', 4)}${field('remarks', 'Remarks', 8)}
     </div>
     <div class="form-check mt-2"><input class="form-check-input" type="checkbox" name="sop_all" id="sopAll" checked><label class="form-check-label small" for="sopAll">Use this SOP / link for the same check list in <b>every company</b> (RC, RCG … — same SOP, different team)</label></div>
-    <div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="hidden" id="hid" ${t.hidden ? 'checked' : ''}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>
+    ${S.isAdmin ? `<div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="hidden" id="hid" ${t.hidden ? 'checked' : ''}><label class="form-check-label" for="hid">Hide this task (it disappears from every tab; history is kept)</label></div>` : '<div class="small muted mt-3">Every change you save is written to the 📜 Change log (old value → new value). Hiding or deleting a task is done by the admin.</div>'}
     <div id="terr" class="text-danger small mt-2"></div>
     <div class="d-flex gap-2 mt-3"><button class="btn btn-primary btn-sm px-4" name="go" value="save">Save</button>${edit ? '' : '<button class="btn btn-outline-primary btn-sm" name="go" value="again">Save &amp; add another point</button>'}<a class="btn btn-secondary btn-sm" href="#/admin/tasks">Cancel</a></div></form>
-    <datalist id="dl_checklist">${Ls.checklist.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`);
+    <datalist id="dl_checklist">${Ls.checklist.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
+    ${edit ? '<div class="panel"><h6>📜 Changes to this task</h6><div id="tlog" class="small muted">Loading…</div></div>' : ''}`);
 
   const form = $('tf');
+  if (!S.isAdmin) {   // user is fixed: no "Other" choice
+    const us = form.querySelector('select[name="user"]');
+    us.querySelectorAll('option').forEach((o) => { if (o.value !== S.prof.username) o.remove(); });
+    us.value = S.prof.username;
+  }
+  if (edit) {
+    fetchTaskLog({ taskId: edit.id }).then((rows) => { if ($('tlog')) $('tlog').innerHTML = rows.length ? logTable(rows, false) : 'No changes yet.'; })
+      .catch((e) => { if ($('tlog')) $('tlog').textContent = friendly(e); });
+  }
   const val = (name) => {
     const el = form.querySelector(`[name="${name}"]`);
     if (el && el.value === '__other') return form.querySelector(`.other[data-for="${name}"]`).value.trim();
@@ -822,20 +847,30 @@ function renderTaskForm(q) {
       const data = readForm(form);
       form.querySelectorAll('select.dd').forEach((s) => { data[s.name] = val(s.name); });
       if (!L.needsMonth(data.recurrence)) data.target_month = '';
+      if (!S.isAdmin) { data.user = S.prof.username; data.hidden = edit ? !!edit.hidden : false; }
       const c = L.cleanTask(data);
       const ts = nowText();
       let id = edit?.id;
       if (edit) {
-        await updateDoc(doc(db, 'tasks', id), { ...c, updated_by: S.prof.username, updated_at: ts });
-        log('EDIT_TASK', `${id} ${c.checklist}`);
+        const changes = L.taskDiff(edit, c);
+        if (!changes.length && !data.sop_all) { toast('Nothing changed', 'warning'); return; }
+        if (changes.length) {
+          await updateDoc(doc(db, 'tasks', id), { ...c, updated_by: S.prof.username, updated_at: ts });
+          await addDoc(collection(db, 'task_log'), logEntry(c, 'EDIT', id, ts, changes));
+          log('EDIT_TASK', `${id} ${c.checklist}`);
+        }
       } else {
         const order = Math.max(0, ...S.tasks.map((x) => x.sort_order || 0)) + 1;
         const ref = await addDoc(collection(db, 'tasks'), { ...c, sort_order: order, created_by: S.prof.username, created_at: ts, updated_by: S.prof.username, updated_at: ts });
         id = ref.id;
+        await addDoc(collection(db, 'task_log'), logEntry(c, 'ADD', id, ts, L.taskDiff({}, c).filter((d) => d.field !== 'hidden')));
         log('ADD_TASK', `${id} ${c.checklist}`);
       }
       if (data.sop_all && (c.sop_name || c.sop_url || c.checklist_url)) {
-        const same = S.tasks.filter((x) => x.id !== id && L.norm(x.depart) === L.norm(c.depart) && L.norm(x.checklist) === L.norm(c.checklist));
+        // an officer can only update his own rows; the admin updates every company
+        const same = S.tasks.filter((x) => x.id !== id && L.norm(x.depart) === L.norm(c.depart) && L.norm(x.checklist) === L.norm(c.checklist)
+          && (S.isAdmin || x.user_lc === S.prof.username_lc)
+          && (x.sop_name !== c.sop_name || x.sop_url !== c.sop_url || x.checklist_url !== c.checklist_url));
         for (let i = 0; i < same.length; i += 400) {
           const b = writeBatch(db);
           same.slice(i, i + 400).forEach((x) => b.update(doc(db, 'tasks', x.id), { sop_name: c.sop_name, sop_url: c.sop_url, checklist_url: c.checklist_url }));
@@ -847,6 +882,51 @@ function renderTaskForm(q) {
       if (again) { location.hash = '#/admin/task?copy=' + id + '&n=' + Date.now(); } else go('admin/tasks');
     } catch (e) { $('terr').textContent = friendly(e); }
   };
+}
+
+// ------------------------------------------------------------------ task change log
+function logEntry(task, action, taskId, ts, changes) {
+  return { action, task_id: taskId, ts, date: today(), by: S.prof.username, by_lc: S.prof.username_lc, by_role: S.prof.role,
+    user: task.user || '', user_lc: L.norm(task.user || ''), depart: task.depart || '', checklist: task.checklist || '', task: task.task || '',
+    company: task.company || '', branch: task.branch || '', changes };
+}
+async function fetchTaskLog({ taskId = '', userLc = '' } = {}) {
+  let qy;
+  if (taskId) qy = S.isAdmin ? query(collection(db, 'task_log'), where('task_id', '==', taskId))
+    : query(collection(db, 'task_log'), where('user_lc', '==', S.prof.username_lc), where('task_id', '==', taskId));
+  else if (!S.isAdmin) qy = query(collection(db, 'task_log'), where('user_lc', '==', S.prof.username_lc));
+  else if (userLc) qy = query(collection(db, 'task_log'), where('user_lc', '==', userLc));
+  else qy = query(collection(db, 'task_log'), orderBy('ts', 'desc'), limit(2000));
+  const snap = await getDocs(qy);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+}
+const ACT_BADGE = { ADD: 'success', EDIT: 'primary', HIDE: 'secondary', UNHIDE: 'info', DELETE: 'danger' };
+function logTable(rows, withTask = true) {
+  return `<div class="table-wrap"><table class="table table-sm table-bordered tbl mb-0"><thead><tr><th>When</th><th>Changed by</th><th>Action</th>${withTask ? '<th>Task</th>' : ''}<th>What changed (old → new)</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td class="text-nowrap small">${esc(r.ts)}</td><td>${esc(r.by)}${r.by_role === 'Admin' ? ' <span class="badge bg-dark">Admin</span>' : ''}</td>
+      <td><span class="badge bg-${ACT_BADGE[r.action] || 'secondary'}">${esc(r.action)}</span></td>
+      ${withTask ? `<td class="small"><b>${esc(r.checklist)}</b><br>${esc(r.task)} · ${esc(r.branch)} · ${esc(r.user)}${r.task_id && S.tasks.some((x) => x.id === r.task_id) ? ` <a href="#/admin/task?id=${r.task_id}">open</a>` : ''}</td>` : ''}
+      <td class="small">${(r.changes || []).length ? r.changes.map((c) => r.action === 'ADD' ? `<div><b>${esc(c.label)}:</b> ${esc(c.to)}</div>`
+        : `<div><b>${esc(c.label)}:</b> <span class="text-danger text-decoration-line-through">${esc(c.from) || '(blank)'}</span> → <span class="text-success">${esc(c.to) || '(blank)'}</span></div>`).join('') : (r.action === 'DELETE' ? 'Task deleted' : '')}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+async function renderTaskLog(q) {
+  mount('admin', '<div class="panel">Loading change log…</div>');
+  const seq = S.seq;
+  const rows = (await fetchTaskLog({ userLc: S.isAdmin ? L.norm(q.user || '') : '' })).filter((r) => (!q.action || r.action === q.action)
+    && (!q.q || L.norm([r.checklist, r.task, r.depart, r.branch, r.by, ...(r.changes || []).map((c) => c.label + ' ' + c.from + ' ' + c.to)].join(' ')).includes(L.norm(q.q))));
+  if (seq !== S.seq) return;
+  mount('admin', `<div class="panel"><form id="lf" class="d-flex flex-wrap gap-2 align-items-center">
+      <a class="btn btn-sm btn-outline-secondary" href="#/admin/tasks">← Tasks</a>
+      <input name="q" value="${esc(q.q || '')}" class="form-control form-control-sm" style="max-width:240px" placeholder="Search check list / field / value…">
+      ${S.isAdmin ? `<select name="user" class="form-select form-select-sm" style="width:auto">${opt(S.users.filter((u) => !u.replaced_by).map((u) => u.username), q.user || '', 'All users')}</select>` : ''}
+      <select name="action" class="form-select form-select-sm" style="width:auto">${opt(['ADD', 'EDIT', 'HIDE', 'UNHIDE', 'DELETE'], q.action || '', 'All actions')}</select>
+      <button class="btn btn-outline-primary btn-sm">Filter</button><button type="button" class="btn btn-success btn-sm" id="lx">⬇ Export Excel</button>
+      <span class="muted small">${rows.length} change(s)</span></form></div>
+    <div class="panel">${rows.length ? logTable(rows) : '<div class="text-center p-4 muted">No task changes yet.</div>'}</div>`);
+  $('lf').onsubmit = (ev) => { ev.preventDefault(); go('admin/log', readForm(ev.target)); };
+  $('lx').onclick = () => exportXlsx('Task_Change_Log', ['When', 'Changed by', 'Role', 'Action', 'User (1st)', 'Department', 'Check List', 'Task', 'Company', 'Branch', 'Field', 'Old', 'New'],
+    rows.flatMap((r) => ((r.changes || []).length ? r.changes : [{ label: '', from: '', to: '' }]).map((c) => [r.ts, r.by, r.by_role, r.action, r.user, r.depart, r.checklist, r.task, r.company, r.branch, c.label, c.from, c.to])));
 }
 
 // ------------------------------------------------------------------ admin: users
@@ -894,6 +974,7 @@ async function renameUser(u, newName) {
   const records = await upd('records');
   await upd('marks');
   await upd('evidence');
+  await upd('task_log');
   await updateDoc(doc(db, 'users', u.uid), { username: newName, username_lc: newLc });
   if (newLc !== oldLc) {
     await setDoc(doc(db, 'usernames', newLc), map.exists() ? map.data() : { email: u.email, uid: u.uid, n: 0 });
@@ -1153,14 +1234,15 @@ async function route() {
   if (!S.prof) return;
   if (S.prof.must_change) return renderPassword(true);
   const { path, q } = parseHash();
-  const adminOnly = ['admin/tasks', 'admin/task', 'users', 'settings'];
+  const adminOnly = ['users', 'settings'];
   try {
     if (adminOnly.includes(path) && !S.isAdmin) return go('tasks');
     if (path === 'report') return await renderReport(q);
     if (path === 'eff') return await renderEff(q);
     if (path === 'monthly') return await renderMonthly(q);
     if (path === 'admin/tasks') return renderAdminTasks(q);
-    if (path === 'admin/task') return renderTaskForm(q);
+    if (path === 'admin/task') return await renderTaskForm(q);
+    if (path === 'admin/log') return await renderTaskLog(q);
     if (path === 'users') return await renderUsers();
     if (path === 'settings') return renderSettings();
     if (path === 'password') return renderPassword(false);

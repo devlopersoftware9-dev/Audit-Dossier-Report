@@ -34,7 +34,23 @@ service cloud.firestore {
       allow delete: if admin();
     }
 
-    match /tasks/{id}    { allow read: if active(); allow write: if admin(); }
+    // tasks: admin does everything; an officer may add / change only his own tasks and can never hide, unhide or delete
+    match /tasks/{id} {
+      allow read: if active();
+      allow create: if admin()
+        || (active() && request.resource.data.user_lc == myLc() && request.resource.data.get('hidden', false) == false);
+      allow update: if admin()
+        || (active() && resource.data.user_lc == myLc() && request.resource.data.user_lc == myLc()
+            && request.resource.data.get('hidden', false) == resource.data.get('hidden', false));
+      allow delete: if admin();
+    }
+    // task change log (old -> new); nobody can edit it, only the admin can delete
+    match /task_log/{id} {
+      allow read: if admin() || (active() && resource.data.user_lc == myLc());
+      allow create: if admin() || (active() && request.resource.data.by_lc == myLc() && request.resource.data.user_lc == myLc());
+      allow update: if false;
+      allow delete: if admin();
+    }
     match /settings/{id} { allow read: if active(); allow write: if admin(); }
     match /monthly/{id}  { allow read: if active(); allow write: if admin(); }
     match /logs/{id}     { allow create: if active(); allow read: if admin(); }
