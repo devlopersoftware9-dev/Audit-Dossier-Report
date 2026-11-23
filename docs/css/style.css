@@ -125,3 +125,32 @@ a { color: var(--link); }
   .mark-box{width:1.7rem!important;height:1.7rem!important}
   .dept-sel{flex:1}
 }
+
+/* ---- Readability: sharper, larger, brighter text ---- */
+:root { --text: #0f172a; --muted: #475569; }
+[data-bs-theme="dark"] { --text: #f1f5f9; --muted: #b4c0d3; --bs-body-color: #f1f5f9; --bs-secondary-color: #b4c0d3; }
+body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; font-size: 15px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; font-weight: 450; }
+.form-control-sm, .form-select-sm, .btn-sm { font-size: 14px; }
+.form-label, .form-label.small { font-size: 13.5px; color: var(--text); }
+.small, small { font-size: 13.5px; }
+.tbl td { font-size: 14.5px; color: var(--text); }
+.tbl thead th { font-size: 13.5px; letter-spacing: .2px; }
+.grp-row td { font-size: 13.5px; letter-spacing: .4px; }
+.task-badge { font-size: 12.5px; font-weight: 600; }
+.badge { font-weight: 600; letter-spacing: .2px; }
+.nav-tabs .nav-link { color: var(--muted); font-weight: 600; font-size: 14.5px; }
+.nav-tabs .nav-link:hover { color: var(--text); }
+.section-title { font-size: 13px; }
+.stat-card .lbl { font-size: 13px; opacity: 1; }
+.night-note, .due-box { font-size: 14px; }
+.hidden-row td { opacity: .6; }
+[data-bs-theme="dark"] .form-control, [data-bs-theme="dark"] .form-select { color: #f1f5f9; }
+[data-bs-theme="dark"] .form-control::placeholder { color: #8a99b2; opacity: 1; }
+[data-bs-theme="dark"] .tbl a, [data-bs-theme="dark"] .link-btn { color: #7cb8ff; }
+@media (max-width: 768px) {
+  body { font-size: 15.5px; }
+  .tbl-cards td { font-size: 15px; }
+  .tbl-cards td::before { opacity: 1; color: var(--muted); font-size: 13.5px; }
+  .tbl-cards .m-title { font-size: 1.05rem; }
+}

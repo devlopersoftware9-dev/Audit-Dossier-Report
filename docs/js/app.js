@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=14';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=14';
+import * as L from './logic.js?v=15';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=15';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
