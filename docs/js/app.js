@@ -1,21 +1,72 @@
 // Audit Dossier Portal — browser app (GitHub Pages + Firebase Auth + Firestore, free Spark plan).
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword,
-  updatePassword, EmailAuthProvider, reauthenticateWithCredential,
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword as _createUser,
+  updatePassword as _updatePassword, EmailAuthProvider, reauthenticateWithCredential,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit, runTransaction, arrayUnion,
+  getFirestore, doc, getDoc as _getDoc, getDocs as _getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, collection, query, where,
+  writeBatch as _writeBatch, addDoc as _addDoc, onSnapshot, orderBy, limit, runTransaction as _runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=18';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=18';
+import * as L from './logic.js?v=19';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=19';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
 
+// ------------------------------------------------------------------ button feedback while saving
+// The button that was pressed shows "Saving…" and is locked until every database write it started has finished,
+// then shows "✔ Saved" (or "✖ Not saved") for a moment and becomes active again — no double clicks.
+const BUSY = { n: 0, btn: null, at: 0, active: null, err: false, timer: null };
+const NO_BUSY = '#askModal button, [data-bs-dismiss], .btn-close, #btnTheme, #btnLogout, .link-btn, .iss-open, .ev-view, [data-df], .no-busy';
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button');
+  if (!b) { if (!ev.target.closest('#askModal, input[type="file"]')) BUSY.btn = null; return; }
+  if (b.matches(NO_BUSY) || b.closest('#askModal')) return;
+  BUSY.btn = b; BUSY.at = Date.now();
+}, true);
+document.addEventListener('submit', (ev) => { if (ev.submitter && ev.submitter.tagName === 'BUTTON') { BUSY.btn = ev.submitter; BUSY.at = Date.now(); } }, true);
+function opStart(isWrite) {
+  BUSY.n++; clearTimeout(BUSY.timer);
+  if (isWrite && !BUSY.active && BUSY.btn && BUSY.btn.isConnected && Date.now() - BUSY.at < 120000) {
+    const b = BUSY.btn;
+    BUSY.btn = null; BUSY.err = false;
+    BUSY.active = { b, html: b.innerHTML, dis: b.disabled };
+    b.style.minWidth = b.offsetWidth + 'px';
+    b.disabled = true;
+    b.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
+  }
+}
+function opEnd(failed) {
+  BUSY.n = Math.max(0, BUSY.n - 1);
+  if (failed) BUSY.err = true;
+  if (BUSY.n || !BUSY.active) return;
+  clearTimeout(BUSY.timer);
+  BUSY.timer = setTimeout(() => { if (BUSY.n || !BUSY.active) return; const a = BUSY.active; BUSY.active = null; finishBtn(a, BUSY.err); }, 700);
+}
+function finishBtn(a, err) {
+  const label = a.html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  if (!a.b.isConnected) { if (!err) toast(`✔ Saved — ${label}`); return; }
+  a.b.innerHTML = err ? '✖ Not saved' : '✔ Saved';
+  a.b.classList.add(err ? 'btn-flash-bad' : 'btn-flash-ok');
+  setTimeout(() => {
+    if (!a.b.isConnected) return;
+    a.b.innerHTML = a.html; a.b.disabled = a.dis; a.b.style.minWidth = '';
+    a.b.classList.remove('btn-flash-ok', 'btn-flash-bad');
+  }, 1500);
+}
+const track = (fn, isWrite = true) => async (...args) => {
+  opStart(isWrite); let bad = false;
+  try { return await fn(...args); } catch (e) { bad = true; throw e; } finally { opEnd(bad); }
+};
+const setDoc = track(_setDoc), updateDoc = track(_updateDoc), addDoc = track(_addDoc), deleteDoc = track(_deleteDoc);
+const runTransaction = track(_runTransaction), createUserWithEmailAndPassword = track(_createUser), updatePassword = track(_updatePassword);
+const getDoc = track(_getDoc, false), getDocs = track(_getDocs, false);
+const writeBatch = (d) => { const b = _writeBatch(d); b.commit = track(b.commit.bind(b)); return b; };
+
 // ------------------------------------------------------------------ state & helpers
-const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, isDept: false, isAuditor: false, issues: null, issueUnsub: null, onIssues: null, settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
+const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, isDept: false, isAuditor: false, issues: null, issueUnsub: null, onIssues: null, roles: L.rolesWithDefaults([]), pages: [], settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => Math.round(Number(v) || 0).toLocaleString('en-PK');
@@ -96,12 +147,27 @@ async function log(action, detail = '') {
 
 // ------------------------------------------------------------------ data
 async function loadSettings() {
-  const d = await getDoc(doc(db, 'settings', 'app'));
+  const [d, r] = await Promise.all([getDoc(doc(db, 'settings', 'app')), getDoc(doc(db, 'settings', 'roles')).catch(() => null)]);
   S.settings = L.settingsWithDefaults(d.exists() ? d.data().values : {});
+  S.roles = L.rolesWithDefaults(r && r.exists() ? r.data().list : []);
+  if (S.prof) S.pages = L.pagesFor(S.prof, S.roles);
 }
-async function loadTasks() {
-  const snap = await getDocs(collection(db, 'tasks'));
-  S.tasks = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+/** Tasks are kept in this browser and re-read from the database only when the admin changed them
+ *  (settings/tasks_meta.v changes) — 1 read per page load instead of ~600. changed=true after an admin edit. */
+async function loadTasks(changed = false) {
+  if (changed && S.isAdmin) await setDoc(doc(db, 'settings', 'tasks_meta'), { v: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), by: S.prof.username, at: nowText() });
+  const m = await getDoc(doc(db, 'settings', 'tasks_meta')).catch(() => null);
+  let v = m && m.exists() ? m.data().v : '';
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem('adp_tasks') || 'null'); } catch (e) { cached = null; }
+  if (v && cached && cached.v === v && Array.isArray(cached.tasks)) {
+    S.tasks = cached.tasks;
+  } else {
+    const snap = await getDocs(collection(db, 'tasks'));
+    S.tasks = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (!v && S.isAdmin) { v = Date.now().toString(36); await setDoc(doc(db, 'settings', 'tasks_meta'), { v, by: S.prof.username, at: nowText() }).catch(() => {}); }
+    try { if (v) localStorage.setItem('adp_tasks', JSON.stringify({ v, tasks: S.tasks })); } catch (e) { /* storage full: just read from the database next time */ }
+  }
   S.groups = L.buildGroups(S.tasks);
 }
 async function loadUsers() {
@@ -235,11 +301,12 @@ async function saveMonthly(ym, recs) {
 }
 
 // ------------------------------------------------------------------ layout
+const homePath = () => { const p = S.pages[0] || 'tasks'; return p === 'admin' ? 'admin/tasks' : p; };
 function shell(active, inner) {
   const tab = (id, label, path) => `<li class="nav-item"><a class="nav-link ${active === id ? 'active' : ''}" href="#/${path}">${label}</a></li>`;
   return `<div class="container-fluid py-2">
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
-      <a href="#/${S.isDept ? 'issues' : 'tasks'}" class="app-title text-dark text-decoration-none">${esc(S.settings.APP_TITLE)}</a>
+      <a href="#/${homePath()}" class="app-title text-dark text-decoration-none">${esc(S.settings.APP_TITLE)}</a>
       <div class="d-flex align-items-center gap-2">
         <span class="muted small">${today()} · ${L.dayName(today())}</span>
         <span class="badge bg-success py-2">User: ${esc(S.prof.username)}${S.isAdmin ? ' (Admin)' : S.isDept ? ` (Department: ${esc(S.prof.department)})` : ''}</span>
@@ -249,9 +316,7 @@ function shell(active, inner) {
       </div>
     </div>
     <ul class="nav nav-tabs mb-2">
-      ${S.isDept ? '' : tab('tasks', 'Tasks Portal', 'tasks') + tab('report', 'Reporting', 'report') + tab('eff', 'Efficiency &amp; Fines', 'eff') + tab('monthly', 'Performance', 'monthly')}
-      ${tab('issues', 'Audit Issues <span class="badge rounded-pill bg-danger d-none" id="issueBadge"></span>', 'issues')}${tab('ireport', 'Issue Reports', 'ireport')}
-      ${S.isAdmin ? tab('admin', 'Task Manager', 'admin/tasks') + tab('users', 'Users', 'users') + tab('settings', 'Settings', 'settings') : ''}
+      ${L.PAGES.filter(([k]) => S.pages.includes(k)).map(([k, label]) => tab(k, k === 'issues' ? 'Audit Issues <span class="badge rounded-pill bg-danger d-none" id="issueBadge"></span>' : esc(label), k === 'admin' ? 'admin/tasks' : k)).join('')}
     </ul>
     <div id="main">${inner}</div></div>`;
 }
@@ -343,7 +408,8 @@ function renderSetup() {
 
 // ------------------------------------------------------------------ evidence pictures
 // Firebase Storage is not free any more, so pictures are shrunk (max 1280 px, JPEG) and kept in Firestore.
-async function compressImage(file, maxSide = 1280) {
+const compressImage = track(compressImage0, false);
+async function compressImage0(file, maxSide = 1280) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('This file is not a picture.')); i.src = url; });
@@ -1088,7 +1154,7 @@ function renderAdminTasks(q) {
             act === 'delete' ? [] : [{ field: 'hidden', label: 'Hidden', from: act === 'hide' ? 'No' : 'Yes', to: act === 'hide' ? 'Yes' : 'No' }]));
         });
         await lb.commit().catch(() => {});
-        await loadTasks();
+        await loadTasks(true);
         toast(`${ids.length} row(s): ${act}`);
         renderAdminTasks(q);
       } catch (e) { fail(e); }
@@ -1236,7 +1302,7 @@ async function renderTaskForm(q) {
           await b.commit();
         }
       }
-      await loadTasks();
+      await loadTasks(true);
       toast('Task saved');
       if (again) { location.hash = '#/admin/task?copy=' + id + '&n=' + Date.now(); } else go('admin/tasks');
     } catch (e) { $('terr').textContent = friendly(e); }
@@ -1305,6 +1371,7 @@ async function createLogin(username, password, extra = {}) {
       username: old.username || username.trim(), username_lc: lc, email, role: old.role || extra.role || 'Officer',
       salary: old.salary ?? (Number(extra.salary) || 0), active: true, created_at: nowText(), last_login: '',
       closed_until: old.closed_until || extra.closed_until || L.addDays(today(), -1), must_change: extra.must_change ?? true,
+      role_name: old.role_name || extra.role_name || '',
       department: old.department || extra.department || '', dept_lc: L.norm(old.department || extra.department || ''), company: old.company ?? extra.company ?? '',
     });
     await setDoc(doc(db, 'usernames', lc), { email, uid, n });
@@ -1341,7 +1408,7 @@ async function renameUser(u, newName) {
     await deleteDoc(doc(db, 'usernames', oldLc));
   }
   log('RENAME_USER', `${u.username} -> ${newName}`);
-  await Promise.all([loadTasks(), loadUsers()]);
+  await Promise.all([loadTasks(true), loadUsers()]);
   clearCache();
   return { tasks, records };
 }
@@ -1355,11 +1422,12 @@ async function renderUsers() {
   mount('users', `<div class="row g-2"><div class="col-lg-8"><div class="panel"><h6>Users</h6>
     ${missing.length ? `<div class="alert alert-warning py-2 small">Tasks are assigned to names that have no login: <b>${esc(missing.join(', '))}</b>. Add them on the right.</div>` : ''}
     <div class="table-wrap"><table class="table table-sm table-bordered tbl mb-0"><thead><tr><th>Username</th><th>Role</th><th>Department login</th><th>Monthly Salary</th><th>Active</th><th>Active tasks</th><th>Last login</th><th></th></tr></thead><tbody>
-    ${live.map((u, i) => `<tr class="${u.active ? '' : 'hidden-row'}"><td><b>${esc(u.username)}</b></td><td>${esc(u.role)}</td><td>${u.role === 'Department' ? esc(u.department) + ' · ' + esc(u.company || 'RC & RCG') : ''}</td><td>${money(u.salary)}</td><td>${u.active ? 'Y' : 'N'}</td><td>${cnt(u.username_lc)}</td><td class="small">${esc(u.last_login || '')}</td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Edit</button></td></tr>`).join('')}
+    ${live.map((u, i) => `<tr class="${u.active ? '' : 'hidden-row'}"><td><b>${esc(u.username)}</b></td><td>${esc(L.roleNameOf(u))}<div class="small muted">${esc(L.pagesFor(u, S.roles).map((k) => (L.PAGES.find(([p]) => p === k) || [k, k])[1]).join(', '))}</div></td><td>${u.role === 'Department' ? esc(u.department) + ' · ' + esc(u.company || 'RC & RCG') : ''}</td><td>${money(u.salary)}</td><td>${u.active ? 'Y' : 'N'}</td><td>${cnt(u.username_lc)}</td><td class="small">${esc(u.last_login || '')}</td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Edit</button></td></tr>`).join('')}
     </tbody></table></div></div></div>
     <div class="col-lg-4"><form class="panel" id="uf"><h6 id="ufT">Add User</h6>
       <label class="form-label small fw-bold">Username (same name used in tasks — can be renamed)</label><input name="username" class="form-control form-control-sm mb-2" required>
-      <label class="form-label small fw-bold">Role</label><select name="role" id="ufRole" class="form-select form-select-sm mb-2"><option value="Officer">Officer (auditor)</option><option value="Admin">Admin</option><option value="Department">Department (sees only its audit issues)</option></select>
+      <label class="form-label small fw-bold">Role <span class="muted fw-normal">(decides which pages the user sees — Settings → Roles &amp; pages)</span></label><select name="role_name" id="ufRole" class="form-select form-select-sm mb-1">${S.roles.map((r) => `<option value="${esc(r.name)}">${esc(r.name)} — ${esc(L.BASE_LABEL[r.base].split(' (')[0])}</option>`).join('')}</select>
+      <div class="small muted mb-2" id="ufPages"></div>
       <div id="ufDept" class="d-none"><label class="form-label small fw-bold">Department</label><select name="department" class="form-select form-select-sm mb-2">${opt(L.listings(S.tasks).depart, '', '— select —')}</select>
         <label class="form-label small fw-bold">Organization</label><select name="company" class="form-select form-select-sm mb-2">${opt(L.SHEET_LISTS.company, '', 'RC & RCG (both)')}</select></div>
       <label class="form-label small fw-bold">Monthly Salary (for % fine)</label><input name="salary" type="number" min="0" class="form-control form-control-sm mb-2">
@@ -1369,12 +1437,19 @@ async function renderUsers() {
       <div id="uerr" class="text-danger small mt-2"></div></form></div></div>`);
   let editing = null;   // eslint-disable-line prefer-const
   const f = $('uf');
-  const deptBox = () => $('ufDept').classList.toggle('d-none', f.role.value !== 'Department');
-  f.role.onchange = deptBox;
+  const roleOf = (name) => S.roles.find((r) => r.name === name) || S.roles[1];
+  const deptBox = () => {
+    const r = roleOf(f.role_name.value);
+    $('ufDept').classList.toggle('d-none', r.base !== 'Department');
+    $('ufPages').textContent = 'Pages: ' + r.pages.map((k) => (L.PAGES.find(([p]) => p === k) || [k, k])[1]).join(', ');
+  };
+  f.role_name.onchange = deptBox;
+  f.role_name.value = 'Auditor';
+  deptBox();
   $('main').onclick = (ev) => {
     const b = ev.target.closest('[data-i]'); if (!b) return;
     editing = live[+b.dataset.i];
-    f.username.value = editing.username; f.username.readOnly = false; f.role.value = editing.role; f.salary.value = editing.salary || 0; f.active.checked = !!editing.active; f.password.value = '';
+    f.username.value = editing.username; f.username.readOnly = false; f.role_name.value = L.roleNameOf(editing); f.salary.value = editing.salary || 0; f.active.checked = !!editing.active; f.password.value = '';
     f.department.value = editing.department || ''; f.company.value = editing.company || ''; deptBox();
     $('ufT').textContent = 'Edit ' + editing.username; $('pwHint').textContent = '(blank = keep; filled = reset password)';
   };
@@ -1382,6 +1457,7 @@ async function renderUsers() {
   f.onsubmit = async (ev) => {
     ev.preventDefault();
     const v = readForm(f);
+    v.role = roleOf(v.role_name).base;
     try {
       if (editing) {
         if (editing.uid === S.uid && (v.role !== 'Admin' || !v.active)) throw new Error('You cannot remove your own Admin access.');
@@ -1394,7 +1470,7 @@ async function renderUsers() {
           editing = { ...editing, username: newName, username_lc: L.norm(newName) };
         }
         if (v.role === 'Department' && !v.department) throw new Error('Choose the department for this login.');
-        await updateDoc(doc(db, 'users', editing.uid), { role: v.role, salary: Number(v.salary) || 0, active: !!v.active,
+        await updateDoc(doc(db, 'users', editing.uid), { role: v.role, role_name: v.role_name, salary: Number(v.salary) || 0, active: !!v.active,
           department: v.role === 'Department' ? v.department : '', dept_lc: v.role === 'Department' ? L.norm(v.department) : '', company: v.role === 'Department' ? (v.company || '') : '' });
         if (v.password) {
           const self = editing.uid === S.uid;
@@ -1408,7 +1484,7 @@ async function renderUsers() {
         if (!v.password || v.password.length < 6) throw new Error('Password (min 6) is required for a new user.');
         if (known.has(L.norm(v.username))) throw new Error('This username already exists — click Edit instead.');
         if (v.role === 'Department' && !v.department) throw new Error('Choose the department for this login.');
-        await createLogin(v.username, v.password, { role: v.role, salary: v.salary, must_change: true,
+        await createLogin(v.username, v.password, { role: v.role, role_name: v.role_name, salary: v.salary, must_change: true,
           ...(v.role === 'Department' ? { department: v.department, company: v.company || '' } : {}) });
         log('ADD_USER', v.username);
         toast('User created');
@@ -1433,6 +1509,12 @@ function renderSettings() {
       <b>3) Department fine</b> (separate from the auditor): the auditor first ticks <b>TRUE</b> (he checked it), then chooses the department's work: <b>Complete</b> or <b>Incomplete</b> (+ remarks and 📷 pictures as evidence). Every <b>Incomplete</b> = <code>DEPT_INCOMPLETE_FINE</code> Rs (or the department's own rate in <code>DEPT_INCOMPLETE_FINES</code>) charged to that <b>company · department</b>. See Performance → "Department fines" and the Efficiency report (Dept Fine column).<br>
       <span class="muted"><b>Example:</b> 300 tasks due in the month, 270 TRUE, 30 FALSE → efficiency 90% → grade A. Per-task: 30 × Rs 100 = Rs 3,000 (if 10 of the 30 were Accounts with <code>Accounts:200</code> → 20×100 + 10×200 = Rs 4,000). Salary %: 90% falls in 85:2 → 2% of Rs 50,000 = Rs 1,000. Total (BOTH) = Rs 4,000 or Rs 5,000.</span>
     </div></div>
+    <div class="panel"><h6>👥 Roles &amp; pages <span class="muted fw-normal small">— tick the pages each role can see; give the role to users in <b>Users</b></span></h6>
+      <div class="table-wrap"><table class="table table-sm table-bordered tbl mb-2" id="rolesT"><thead><tr><th>Role</th><th>Type</th>${L.PAGES.map(([, l]) => `<th class="text-center small">${esc(l)}</th>`).join('')}<th></th></tr></thead><tbody></tbody></table></div>
+      <div class="d-flex gap-2 flex-wrap align-items-center"><input id="rnName" class="form-control form-control-sm" style="max-width:180px" placeholder="New role name">
+        <select id="rnBase" class="form-select form-select-sm" style="max-width:260px">${['Officer', 'Department'].map((b) => `<option value="${b}">${esc(L.BASE_LABEL[b])}</option>`).join('')}</select>
+        <button type="button" class="btn btn-outline-primary btn-sm no-busy" id="rnAdd">＋ Add role</button><button type="button" class="btn btn-primary btn-sm" id="rSave">Save roles</button></div>
+      <div class="small muted mt-1">Admin always sees every page. "Type" decides what the role is allowed to do in the database: an Auditor-type role can only get auditor pages, a Department-type role only Audit Issues and Issue Reports. Users see the change after they refresh.</div></div>
     <form class="panel" id="sf"><h6>Fines, grades &amp; rules</h6>
     <table class="table table-sm table-bordered mb-2"><thead><tr><th>Setting</th><th style="width:38%">Value</th><th>Help</th></tr></thead><tbody>
     ${L.DEFAULT_SETTINGS.map(([k, , note]) => `<tr><td class="small fw-bold">${k}</td><td>${k === 'FINE_MODE' ? `<select name="${k}" class="form-select form-select-sm">${['NONE', 'PER_TASK', 'PERCENT', 'BOTH'].map((m) => `<option ${m === String(S.settings[k]).toUpperCase() ? 'selected' : ''}>${m}</option>`).join('')}</select>` : `<input name="${k}" value="${esc(S.settings[k])}" class="form-control form-control-sm">`}</td><td class="small muted">${esc(note)}</td></tr>`).join('')}
@@ -1448,6 +1530,36 @@ function renderSettings() {
       <div class="panel"><h6>Duplicate history check</h6><div class="small muted mb-2">Finds TRUE/FALSE records saved twice for the same day, user and check list (e.g. from an import whose Branch column had #REF!). The copy with the real branch is kept.</div>
         <button class="btn btn-outline-secondary btn-sm w-100" id="btnDup">Check for duplicates</button><div class="small mt-2" id="dupOut"></div></div>
       <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div></div></div>`);
+  let roles = S.roles.map((r) => ({ ...r, pages: [...r.pages] }));
+  const drawRoles = () => {
+    $('rolesT').querySelector('tbody').innerHTML = roles.map((r, i) => `<tr><td><b>${esc(r.name)}</b>${r.builtin ? ' <span class="badge bg-secondary">built-in</span>' : ''}</td><td class="small">${esc(L.BASE_LABEL[r.base].split(' (')[0])}</td>
+      ${L.PAGES.map(([k]) => { const ok = L.BASE_PAGES[r.base].includes(k); return `<td class="text-center">${ok ? `<input type="checkbox" class="form-check-input rp" data-r="${i}" data-p="${k}" ${r.pages.includes(k) ? 'checked' : ''} ${r.base === 'Admin' ? 'disabled' : ''}>` : '<span class="muted">—</span>'}</td>`; }).join('')}
+      <td>${r.builtin ? '' : `<button type="button" class="btn btn-sm btn-outline-danger py-0 no-busy rdel" data-r="${i}">✕</button>`}</td></tr>`).join('');
+  };
+  drawRoles();
+  $('rolesT').onchange = (ev) => {
+    const c = ev.target.closest('.rp'); if (!c) return;
+    const r = roles[+c.dataset.r];
+    r.pages = c.checked ? [...new Set([...r.pages, c.dataset.p])] : r.pages.filter((p) => p !== c.dataset.p);
+  };
+  $('rolesT').onclick = (ev) => { const d = ev.target.closest('.rdel'); if (d) { roles.splice(+d.dataset.r, 1); drawRoles(); } };
+  $('rnAdd').onclick = () => {
+    const name = $('rnName').value.trim();
+    if (!name) return toast('Type a role name', 'warning');
+    if (roles.some((r) => L.norm(r.name) === L.norm(name))) return toast('This role already exists', 'warning');
+    const base = $('rnBase').value;
+    roles.push({ name, base, pages: [...L.BASE_PAGES[base]] }); $('rnName').value = ''; drawRoles();
+  };
+  $('rSave').onclick = async () => {
+    const empty = roles.find((r) => !r.pages.length);
+    if (empty) return toast(`Role "${empty.name}" has no page ticked.`, 'warning');
+    const inUse = S.users.filter((u) => !u.replaced_by && u.role_name && !roles.some((r) => r.name === u.role_name)).map((u) => u.username);
+    if (inUse.length) return toast(`Removed role is still given to: ${inUse.join(', ')}. Change them in Users first.`, 'warning');
+    try {
+      await setDoc(doc(db, 'settings', 'roles'), { list: roles.filter((r) => r.base !== 'Admin').map(({ name, base, pages }) => ({ name, base, pages })), at: nowText(), by: S.prof.username });
+      await loadSettings(); log('SAVE_ROLES'); toast('Roles saved — users see the change after a refresh');
+    } catch (e) { fail(e); }
+  };
   $('sf').onsubmit = async (ev) => {
     ev.preventDefault();
     try { await setDoc(doc(db, 'settings', 'app'), { values: readForm(ev.target) }); await loadSettings(); log('SAVE_SETTINGS'); toast('Settings saved'); } catch (e) { fail(e); }
@@ -1566,7 +1678,7 @@ async function importWorkbook(file, mode = 'tasks') {
       await createLogin(name, 'Audit@123', { role: 'Officer', closed_until: yest, must_change: true });
       say(`Login created: "${name}" / Audit@123 (must change at first login)`);
     }
-    await Promise.all([loadTasks(), loadUsers()]);
+    await Promise.all([loadTasks(true), loadUsers()]);
     clearCache();
     log('IMPORT', `${mode}: ${res.tasks.length} tasks, +${toAdd.length} records, users ${res.users.join(', ')}`);
     say('Done ✔');
@@ -1607,8 +1719,8 @@ async function route() {
   const { path, q } = parseHash();
   const adminOnly = ['admin/tasks', 'admin/task', 'admin/log', 'users', 'settings'];
   try {
-    if (S.isDept && !['issues', 'issues/new', 'ireport', 'password'].includes(path)) return go('issues');
-    if (adminOnly.includes(path) && !S.isAdmin) return go('tasks');
+    if (path !== 'password' && !S.pages.includes(L.pageOfPath(path))) return go(homePath());
+    if (adminOnly.includes(path) && !S.isAdmin) return go(homePath());
     if (path === 'issues') return await renderIssues(q);
     if (path === 'issues/new') return await renderIssueForm(q);
     if (path === 'ireport') return await renderIssueReport(q);
@@ -1656,8 +1768,10 @@ async function boot(user) {
     if (!p.exists() || !p.data().active) { await signOut(auth); return renderLogin('This login is not active. Ask the admin.'); }
     S.uid = user.uid; S.prof = p.data(); S.isAdmin = S.prof.role === 'Admin';
     S.isDept = S.prof.role === 'Department'; S.isAuditor = !S.isDept;
+    S.pages = L.pagesFor(S.prof, S.roles);
     $('app').innerHTML = loading;
     await Promise.all([loadSettings(), S.isDept ? Promise.resolve() : loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
+    S.pages = L.pagesFor(S.prof, S.roles);
     if (!S.isAdmin) S.users = [{ uid: S.uid, ...S.prof }];
     updateDoc(doc(db, 'users', S.uid), { last_login: nowText() }).catch(() => {});
     document.title = S.settings.APP_TITLE;

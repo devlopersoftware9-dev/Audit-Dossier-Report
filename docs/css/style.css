@@ -172,3 +172,8 @@ body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-
 .nav-link #issueBadge { font-size: 11px; vertical-align: middle; }
 .nav-pills .nav-link { font-weight: 600; }
 @media (max-width: 768px) { .iss-major { border-left: 4px solid #dc3545 !important; } .iss-major td:first-child { border-left: 0 !important; } }
+
+/* ---- Save button feedback ---- */
+.btn:disabled .spinner-border { vertical-align: -2px; }
+.btn.btn-flash-ok { background: #198754 !important; border-color: #198754 !important; color: #fff !important; opacity: 1 !important; }
+.btn.btn-flash-bad { background: #dc3545 !important; border-color: #dc3545 !important; color: #fff !important; opacity: 1 !important; }

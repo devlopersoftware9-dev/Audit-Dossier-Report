@@ -667,3 +667,47 @@ export function issueReport(list, f, today) {
   if (sub) { const all = [...subs.values()].map(fin); rows.forEach((g) => { g.children = all.filter((c) => c.key === g.key).sort(sorter(sub, 'sub')); }); }
   return { rows, totals: fin(tot), items, group_by: by, sub_group: sub };
 }
+
+// ---------- roles: which pages a login can open ----------
+export const PAGES = [['tasks', 'Tasks Portal'], ['report', 'Reporting'], ['eff', 'Efficiency & Fines'], ['monthly', 'Performance'],
+  ['issues', 'Audit Issues'], ['ireport', 'Issue Reports'], ['admin', 'Task Manager'], ['users', 'Users'], ['settings', 'Settings']];
+/** Pages each base type is technically allowed to use (the database rules follow the base type). */
+export const BASE_PAGES = {
+  Admin: PAGES.map(([k]) => k),
+  Officer: ['tasks', 'report', 'eff', 'monthly', 'issues', 'ireport'],
+  Department: ['issues', 'ireport'],
+};
+export const BASE_LABEL = { Admin: 'Admin (everything)', Officer: 'Auditor / Officer (ticks tasks, raises issues)', Department: 'Department (answers its audit issues)' };
+export const DEFAULT_ROLES = [
+  { name: 'Admin', base: 'Admin', pages: BASE_PAGES.Admin, builtin: true },
+  { name: 'Auditor', base: 'Officer', pages: BASE_PAGES.Officer, builtin: true },
+  { name: 'Department', base: 'Department', pages: BASE_PAGES.Department, builtin: true },
+];
+const DEFAULT_ROLE_OF = { Admin: 'Admin', Officer: 'Auditor', Department: 'Department' };
+export function rolesWithDefaults(list = []) {
+  const out = DEFAULT_ROLES.map((r) => ({ ...r }));
+  for (const r of list || []) {
+    if (!r || !r.name || !BASE_PAGES[r.base]) continue;
+    const pages = (r.pages || []).filter((p) => BASE_PAGES[r.base].includes(p));
+    const i = out.findIndex((x) => norm(x.name) === norm(r.name));
+    if (i >= 0) { if (out[i].base !== 'Admin') out[i].pages = pages; } else out.push({ name: String(r.name).trim(), base: r.base, pages });
+  }
+  return out;
+}
+export const roleNameOf = (prof) => (prof && prof.role_name) || DEFAULT_ROLE_OF[prof && prof.role] || 'Auditor';
+/** Pages this login may open. Admin always keeps every page so nobody can lock the admin out. */
+export function pagesFor(prof, roles) {
+  const base = prof && prof.role;
+  if (base === 'Admin') return [...BASE_PAGES.Admin];
+  const allowed = BASE_PAGES[base] || BASE_PAGES.Officer;
+  const r = (roles || []).find((x) => norm(x.name) === norm(roleNameOf(prof)) && x.base === base)
+    || (roles || []).find((x) => x.name === DEFAULT_ROLE_OF[base]);
+  const pages = (r ? r.pages : allowed).filter((p) => allowed.includes(p));
+  return pages.length ? pages : [allowed[0]];
+}
+export function pageOfPath(path) {
+  if (!path || path === 'tasks') return 'tasks';
+  if (path.startsWith('admin')) return 'admin';
+  if (path.startsWith('issues')) return 'issues';
+  return path;
+}

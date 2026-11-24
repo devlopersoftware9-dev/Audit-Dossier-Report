@@ -27,7 +27,7 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if active();
+      allow read: if admin() || (signedIn() && uid == request.auth.uid);   // salaries etc. are private
       allow create: if admin()
         || (signedIn() && !setupDone() && uid == request.auth.uid && request.resource.data.role == 'Admin');
       allow update: if admin()
