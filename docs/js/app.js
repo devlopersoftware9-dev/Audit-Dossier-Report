@@ -5,17 +5,17 @@ import {
   updatePassword, EmailAuthProvider, reauthenticateWithCredential,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit,
+  getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit, runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=15';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=15';
+import * as L from './logic.js?v=16';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=16';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
 
 // ------------------------------------------------------------------ state & helpers
-const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
+const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, isDept: false, isAuditor: false, issues: null, issueUnsub: null, onIssues: null, settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => Math.round(Number(v) || 0).toLocaleString('en-PK');
@@ -189,7 +189,7 @@ async function closeDay() {
 async function closePendingDays() {
   const yest = L.addDays(today(), -1);
   const ts = nowText();
-  const people = S.isAdmin ? S.users.filter((u) => u.active && u.role !== 'Admin') : [{ ...S.prof, uid: S.uid }];
+  const people = S.isAdmin ? S.users.filter((u) => u.active && u.role === 'Officer') : [{ ...S.prof, uid: S.uid }];
   const due = people.filter((u) => (u.closed_until || '') < yest);
   if (!due.length) return 0;
   let from = due.map((u) => u.closed_until || L.addDays(yest, -1)).sort()[0];
@@ -237,26 +237,29 @@ function shell(active, inner) {
   const tab = (id, label, path) => `<li class="nav-item"><a class="nav-link ${active === id ? 'active' : ''}" href="#/${path}">${label}</a></li>`;
   return `<div class="container-fluid py-2">
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
-      <a href="#/tasks" class="app-title text-dark text-decoration-none">${esc(S.settings.APP_TITLE)}</a>
+      <a href="#/${S.isDept ? 'issues' : 'tasks'}" class="app-title text-dark text-decoration-none">${esc(S.settings.APP_TITLE)}</a>
       <div class="d-flex align-items-center gap-2">
         <span class="muted small">${today()} · ${L.dayName(today())}</span>
-        <span class="badge bg-success py-2">User: ${esc(S.prof.username)}${S.isAdmin ? ' (Admin)' : ''}</span>
+        <span class="badge bg-success py-2">User: ${esc(S.prof.username)}${S.isAdmin ? ' (Admin)' : S.isDept ? ` (Department: ${esc(S.prof.department)})` : ''}</span>
         <button class="btn btn-sm btn-outline-secondary" id="btnTheme" title="Light / Dark">${document.documentElement.dataset.bsTheme === 'dark' ? '☀️' : '🌙'}</button>
         <a class="btn btn-sm btn-outline-secondary" href="#/password">Password</a>
         <button class="btn btn-sm btn-outline-danger" id="btnLogout">Logout</button>
       </div>
     </div>
     <ul class="nav nav-tabs mb-2">
-      ${tab('tasks', 'Tasks Portal', 'tasks')}${tab('report', 'Reporting', 'report')}${tab('eff', 'Efficiency &amp; Fines', 'eff')}${tab('monthly', 'Monthly Performance', 'monthly')}
-      ${S.isAdmin ? tab('admin', 'Task Manager', 'admin/tasks') + tab('users', 'Users', 'users') + tab('settings', 'Settings', 'settings') : tab('admin', 'My Tasks', 'admin/tasks')}
+      ${S.isDept ? '' : tab('tasks', 'Tasks Portal', 'tasks') + tab('report', 'Reporting', 'report') + tab('eff', 'Efficiency &amp; Fines', 'eff') + tab('monthly', 'Performance', 'monthly')}
+      ${tab('issues', 'Audit Issues <span class="badge rounded-pill bg-danger d-none" id="issueBadge"></span>', 'issues')}${tab('ireport', 'Issue Reports', 'ireport')}
+      ${S.isAdmin ? tab('admin', 'Task Manager', 'admin/tasks') + tab('users', 'Users', 'users') + tab('settings', 'Settings', 'settings') : ''}
     </ul>
     <div id="main">${inner}</div></div>`;
 }
 function mount(active, inner) {
   S.seq++;
+  S.onIssues = null;
   if (S.unsub) { S.unsub(); S.unsub = null; }
   $('app').innerHTML = shell(active, inner);
-  $('btnLogout').onclick = () => { if (S.unsub) { S.unsub(); S.unsub = null; } signOut(auth); };
+  updateIssueBadge();
+  $('btnLogout').onclick = () => { if (S.unsub) { S.unsub(); S.unsub = null; } stopIssueWatch(); signOut(auth); };
   $('btnTheme').onclick = () => {
     const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.bsTheme = next;
@@ -274,7 +277,7 @@ const myTasksFilter = (lc) => (g) => !lc || L.norm(g.user) === lc;
 function filterOptions() {
   const gs = S.isAdmin ? S.tasks : S.tasks.filter((t) => t.user_lc === S.prof.username_lc);
   const col = (k) => [...new Set(gs.map((t) => t[k]).filter(Boolean))].sort();
-  return { users: S.isAdmin ? S.users.map((u) => u.username) : [S.prof.username], departments: col('depart'), branches: col('branch'), task_types: col('task') };
+  return { users: S.isAdmin ? S.users.filter((u) => u.role !== 'Department').map((u) => u.username) : [S.prof.username], departments: col('depart'), branches: col('branch'), task_types: col('task') };
 }
 function readForm(form) {
   const o = {};
@@ -372,10 +375,10 @@ async function renderTasks(q) {
   const mk = new Map(marks.map((r) => [markKeyOf(r), r]));
   const recsToday = [...dbToday.filter((r) => !mk.has(markKeyOf(r))), ...mk.values()];
   const who = viewLc ? S.groups.find((g) => L.norm(g.user) === viewLc)?.user || q.user || S.prof.username : null;
-  let rows = tab === 'today' ? L.todayTasks(S.groups, recsToday, t, opts(), who)
+  let rows = tab === 'today' ? L.todayTasks(S.groups, recsToday, t, opts(), who, true)
     : L.categoryTasks(S.groups, recsToday, t, opts(), tab, val, who);
-  if (!who && tab === 'today') rows = L.todayTasks(S.groups, recsToday, t, opts(), null);
-  const st = L.stats(L.todayTasks(S.groups, recsToday, t, opts(), who));
+  if (!who && tab === 'today') rows = L.todayTasks(S.groups, recsToday, t, opts(), null, true);
+  const st = L.stats(L.todayTasks(S.groups, recsToday, t, opts(), who));   // trigger tasks are not counted
   let mtd = '–', fine = '–';
   if (viewLc && t.slice(8) !== '01') {
     const recs = await fetchRecords(t.slice(0, 8) + '01', L.addDays(t, -1), viewLc);
@@ -389,13 +392,15 @@ async function renderTasks(q) {
   const isAll = S.isAdmin && !viewLc;
   const ACT = ['Mark (TRUE)', 'Department', 'Remarks', 'Evidence'];
   const head = tab === 'today'
-    ? ['Company', 'Branch Name', 'Task', 'Depart', 'Check List', 'SOP', 'Target Day / Date', 'Recurrence', ...(S.isAdmin ? ['User'] : []), ...ACT]
-    : ['Depart', 'Check List', 'Task', 'Recurrence', 'Target Day / Date', 'Company', 'Branch Name', 'SOP', ...(S.isAdmin ? ['User'] : []), 'Due Today', ...ACT];
+    ? ['Organization', 'Branch Name', 'Task', 'Depart', 'Check List', 'SOP', 'Target Day / Date', 'Recurrence', ...(S.isAdmin ? ['User'] : []), ...ACT]
+    : ['Depart', 'Check List', 'Task', 'Recurrence', 'Target Day / Date', 'Organization', 'Branch Name', 'SOP', ...(S.isAdmin ? ['User'] : []), 'Due Today', ...ACT];
   let body = '';
   rows.forEach((r, i) => {
     if (i === 0 || r.bucket !== rows[i - 1].bucket) {
       const n = rows.filter((x) => x.bucket === r.bucket).length;
-      body += `<tr class="grp-row" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">📋 ${esc(r.bucket)} tasks (${n}) ↕ <span class="fw-normal">(click to collapse / expand)</span></td></tr>`;
+      body += r.trigger
+        ? `<tr class="grp-row grp-trigger" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">⚡ Triggered tasks (${n}) — tick only when it was triggered · <span class="fw-normal">not counted in efficiency, never auto-FALSE</span> ↕</td></tr>`
+        : `<tr class="grp-row" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">📋 ${esc(r.bucket)} tasks (${n}) ↕ <span class="fw-normal">(click to collapse / expand)</span></td></tr>`;
     }
     const cl = `<button type="button" class="link-btn" data-i="${i}">${esc(r.checklist)}</button>`;
     const sop = r.sop_url ? `<a href="${esc(r.sop_url)}" target="_blank" rel="noopener">${esc(r.sop_name || 'Open SOP')}</a>` : esc(r.sop_name);
@@ -410,22 +415,22 @@ async function renderTasks(q) {
           <input type="file" accept="image/*" capture="environment" class="d-none ev-file"></div>`);
     const cls = 'b-' + r.bucket.replace(/[ /]/g, '') + (r.status ? ' row-done' : '');
     body += tab === 'today'
-      ? `<tr class="${cls}" data-i="${i}">${td('Company', esc(r.company), 'm-hide')}${td('Branch', esc(r.branch))}${td('Task', `<span class="task-badge">${esc(r.task)}</span>`)}${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('SOP', sop || '<span class="muted">—</span>')}${td('Target', esc(r.target), 'm-hide')}${td('Recurrence', esc(r.recurrence), 'm-hide')}${S.isAdmin ? td('User', esc(r.user)) : ''}${mark}</tr>`
-      : `<tr class="${cls}" data-i="${i}">${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('Task', esc(r.task))}${td('Recurrence', esc(r.recurrence))}${td('Target', esc(r.target))}${td('Company', esc(r.company), 'm-hide')}${td('Branch', esc(r.branch))}${td('SOP', sop || '<span class="muted">—</span>')}${S.isAdmin ? td('User', esc(r.user)) : ''}${td('Due Today', r.due_today ? '<span class="badge bg-primary">Y</span>' : '<span class="muted">N</span>')}${mark}</tr>`;
+      ? `<tr class="${cls}" data-i="${i}">${td('Organization', esc(r.company))}${td('Branch', esc(r.branch))}${td('Task', `<span class="task-badge">${esc(r.task)}</span>`)}${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('SOP', sop || '<span class="muted">—</span>')}${td('Target', esc(r.target), 'm-hide')}${td('Recurrence', esc(r.recurrence), 'm-hide')}${S.isAdmin ? td('User', esc(r.user)) : ''}${mark}</tr>`
+      : `<tr class="${cls}" data-i="${i}">${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('Task', esc(r.task))}${td('Recurrence', esc(r.recurrence))}${td('Target', esc(r.target))}${td('Organization', esc(r.company))}${td('Branch', esc(r.branch))}${td('SOP', sop || '<span class="muted">—</span>')}${S.isAdmin ? td('User', esc(r.user)) : ''}${td('Due Today', r.due_today ? '<span class="badge bg-primary">Y</span>' : '<span class="muted">N</span>')}${mark}</tr>`;
   });
   const card = (cls, lbl, v, id = '') => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val" ${id ? `id="${id}"` : ''}>${v}</div></div></div>`;
   $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-blue', 'Total Tasks (Today)', st.total, 'cTotal')}${card('bg-teal', 'Completed', st.done, 'cDone')}${card('bg-amber', 'Pending', st.pending, 'cPending')}${card('bg-green', 'Completion Progress', st.pct + '%', 'cPct')}${card('bg-slate', 'This Month Efficiency', mtd)}${card('bg-red', 'This Month Fine (Rs)', fine)}</div>
     <div class="night-note mb-2">🔄 Ticks are shared live on every computer using this login (<b><span id="pendBox">${marks.length}</span></b> ticked today). At <b>${esc(closeLabel())}</b> the day is saved to the database in one go, unmarked tasks become FALSE and the page loads the next day's tasks.</div>
     <div class="d-flex flex-wrap justify-content-between align-items-start">
       <div class="pill-bar">${pill('today', '', 'Todays Task', 'success')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
-      <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active).map((u) => u.username), q.user || '')}</select>` : ''}
+      <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active && u.role !== 'Department').map((u) => u.username), q.user || '')}</select>` : ''}
         <button class="btn btn-sm btn-success text-nowrap" id="btnExp">⬇ Export Excel</button></div>
     </div>
     <div class="panel"><div class="table-wrap">${rows.length ? `<table class="table table-bordered table-striped table-hover table-sm tbl tbl-cards mb-0"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`
       : `<div class="text-center p-4 muted">${tab === 'today' ? 'No task due today 🎉' : 'No tasks in this tab.'}</div>`}</div></div>`;
   if ($('viewAs')) $('viewAs').onchange = (e) => go('tasks', { tab: tab === 'today' ? '' : tab, v: val, user: e.target.value });
   $('btnExp').onclick = () => exportXlsx(tab === 'today' ? 'Todays_Task_' + t : val + '_Tasks',
-    ['Group', 'Company', 'Branch', 'Department', 'Check List', 'Details', 'Task', 'Recurrence', 'Target Day / Date', 'SOP', 'SOP Link', 'User', 'Status', 'Remarks'],
+    ['Group', 'Organization', 'Branch', 'Department', 'Check List', 'Details', 'Task', 'Recurrence', 'Target Day / Date', 'SOP', 'SOP Link', 'User', 'Status', 'Remarks'],
     rows.map((r) => [r.bucket, r.company, r.branch, r.depart, r.checklist, r.details.map((d, k) => `${k + 1}. ${d}`).join('\n'), r.task, r.recurrence, r.target, r.sop_name, r.sop_url, r.user, r.status == null ? '' : (r.status ? 'TRUE' : 'FALSE'), r.remarks]));
   const main = $('main');
   main.onclick = (ev) => {
@@ -446,7 +451,7 @@ async function renderTasks(q) {
     if (!box.checked) dep.value = '';
     dep.disabled = !box.checked;
     const due = L.isScheduled(r, t, opts());
-    const source = S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
+    const source = !due && L.isPureTrigger(r) ? 'Trigger' : S.isAdmin && L.norm(r.user) !== S.prof.username_lc ? 'Admin' : (due ? 'Portal' : 'Extra');
     const rec = L.makeRecord(r, t, r.user, box.checked, rem.value, source, nowText(), dep.value, r.evidence_ids || []);
     rec.by = S.prof.username;
     await setDoc(doc(db, 'marks', await recordId(rec)), rec);
@@ -455,7 +460,7 @@ async function renderTasks(q) {
     dep.classList.toggle('is-bad', rec.dept_status === 'Incomplete');
     dep.classList.toggle('is-good', rec.dept_status === 'Complete');
     box.title = 'Ticked ' + rec.timestamp + ' — saved to the database at ' + closeLabel();
-    if (note) toast(note + (source === 'Extra' ? ' (not due today)' : ''), box.checked ? 'success' : 'secondary');
+    if (note) toast(note + (source === 'Extra' ? ' (not due today)' : source === 'Trigger' ? ' (trigger task — not counted in efficiency)' : ''), box.checked ? 'success' : 'secondary');
     return rec;
   };
   main.addEventListener('click', async (ev) => {
@@ -542,11 +547,13 @@ function filterBar(f, extra = '') {
   return `<div class="col-md-2"><label class="form-label small fw-bold">Start Date</label><input type="date" name="start" value="${f.start}" class="form-control form-control-sm"></div>
     <div class="col-md-2"><label class="form-label small fw-bold">End Date</label><input type="date" name="end" value="${f.end}" class="form-control form-control-sm"></div>
     ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(o.users, f.user, 'All users')}</select></div>` : ''}
+    <div class="col-md-2"><label class="form-label small fw-bold">Organization</label><select name="company" class="form-select form-select-sm">${opt(L.SHEET_LISTS.company, f.company, 'RC & RCG')}</select></div>
     <div class="col-md-2"><label class="form-label small fw-bold">Department</label><select name="department" class="form-select form-select-sm">${opt(o.departments, f.department, 'All departments')}</select></div>
     <div class="col-md-2"><label class="form-label small fw-bold">Branch</label><select name="branch" class="form-select form-select-sm">${opt(o.branches, f.branch, 'All branches')}</select></div>${extra}`;
 }
 const defF = (q, start) => ({ start: q.start || start || today(), end: q.end || today(), status: q.status || 'ALL', user: q.user || '',
-  department: q.department || '', branch: q.branch || '', task_type: q.task_type || '', checklist: q.checklist || '', source: q.source || '', group_by: q.group_by || 'user', dept_status: q.dept_status || '' });
+  department: q.department || '', branch: q.branch || '', task_type: q.task_type || '', checklist: q.checklist || '', source: q.source || '', group_by: q.group_by || 'user', sub_group: q.sub_group || '', dept_status: q.dept_status || '', company: q.company || '' });
+const groupSel = (name, val, list, none) => `<select name="${name}" class="form-select form-select-sm">${none ? `<option value="">${none}</option>` : ''}${list.map(([v, l]) => `<option value="${v}" ${val === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 
 async function renderReport(q) {
   const f = defF(q);
@@ -556,13 +563,13 @@ async function renderReport(q) {
       ${[['ALL', 'All'], ['TRUE', 'TRUE (Done)'], ['FALSE', 'FALSE (Not done)']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     ${filterBar(f, `<div class="col-md-3"><label class="form-label small fw-bold">Task Type</label><select name="task_type" class="form-select form-select-sm">${opt(o.task_types, f.task_type, 'All task types')}</select></div>
       <div class="col-md-3"><label class="form-label small fw-bold">Check List contains</label><input name="checklist" value="${esc(f.checklist)}" class="form-control form-control-sm"></div>
-      <div class="col-md-2"><label class="form-label small fw-bold">Source</label><select name="source" class="form-select form-select-sm">${opt(['Portal', 'Auto-Closed', 'Admin', 'Extra', 'Imported'], f.source, 'All')}</select></div>
+      <div class="col-md-2"><label class="form-label small fw-bold">Source</label><select name="source" class="form-select form-select-sm">${opt(['Portal', 'Auto-Closed', 'Admin', 'Extra', 'Trigger', 'Imported'], f.source, 'All')}</select></div>
       <div class="col-md-2"><label class="form-label small fw-bold">Department status</label><select name="dept_status" class="form-select form-select-sm">
         ${[['', 'All'], ['Complete', 'Complete'], ['Incomplete', 'Incomplete'], ['none', 'Not given']].map(([v, l]) => `<option value="${v}" ${f.dept_status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`)}</div>
     <button class="btn btn-primary w-100 mt-2 btn-sm">Generate Report</button></form><div class="panel" id="out">${q.start ? loading : '<div class="muted p-3">Choose filters and press Generate Report.</div>'}</div>`);
   $('rf').onsubmit = (ev) => { ev.preventDefault(); go('report', readForm(ev.target)); };
   let rows = [];
-  $('btnExp').onclick = () => exportXlsx(`Report_${f.start}_to_${f.end}`, ['Date', 'User', 'Company', 'Branch', 'Department', 'Check List', 'To-Do', 'Task Type', 'Status', 'Department status', 'Pictures', 'Remarks', 'Timestamp', 'Ticked by', 'Source'],
+  $('btnExp').onclick = () => exportXlsx(`Report_${f.start}_to_${f.end}`, ['Date', 'User', 'Organization', 'Branch', 'Department', 'Check List', 'To-Do', 'Task Type', 'Status', 'Department status', 'Pictures', 'Remarks', 'Timestamp', 'Ticked by', 'Source'],
     rows.map((r) => [r.date, r.user, r.company, r.branch, r.department, r.checklist, r.todo, r.task_type, r.status ? 'TRUE' : 'FALSE', r.dept_status || '', (r.evidence_ids || []).length, r.remarks, r.timestamp, r.by || '', r.source]));
   if (!q.start) return;
   const my = S.seq;
@@ -572,7 +579,7 @@ async function renderReport(q) {
   const tr = rows.filter((r) => r.status).length;
   $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Records: ${rows.length}</span> <span class="badge bg-success">TRUE: ${tr}</span> <span class="badge bg-danger">FALSE: ${rows.length - tr}</span>
     ${f.status === 'ALL' && rows.length ? `<span class="badge bg-primary">Efficiency: ${Math.round(tr * 1000 / rows.length) / 10}%</span>` : ''}</div>
-    <div class="table-wrap">${rows.length ? `<table class="table table-sm table-striped table-bordered tbl mb-0"><thead><tr><th>Date</th><th>User</th><th>Company</th><th>Branch</th><th>Department</th><th>Check List</th><th>Task Type</th><th>Status</th><th>Department</th><th>Pictures</th><th>Remarks</th><th>Timestamp</th><th>Source</th>${S.isAdmin ? '<th>Edit</th>' : ''}</tr></thead><tbody>
+    <div class="table-wrap">${rows.length ? `<table class="table table-sm table-striped table-bordered tbl mb-0"><thead><tr><th>Date</th><th>User</th><th>Organization</th><th>Branch</th><th>Department</th><th>Check List</th><th>Task Type</th><th>Status</th><th>Department</th><th>Pictures</th><th>Remarks</th><th>Timestamp</th><th>Source</th>${S.isAdmin ? '<th>Edit</th>' : ''}</tr></thead><tbody>
     ${rows.slice(0, 3000).map((r, i) => `<tr><td class="text-nowrap">${r.date}</td><td>${esc(r.user)}</td><td>${esc(r.company)}</td><td>${esc(r.branch)}</td><td>${esc(r.department)}</td><td title="${esc(r.todo)}">${esc(r.checklist)}</td><td>${esc(r.task_type)}</td>
       <td>${r.status ? '<span class="badge bg-success">TRUE</span>' : '<span class="badge bg-danger">FALSE</span>'}</td>
       <td>${r.dept_status === 'Incomplete' ? '<span class="badge bg-warning text-dark">Incomplete</span>' : r.dept_status === 'Complete' ? '<span class="badge bg-info text-dark">Complete</span>' : '<span class="muted">—</span>'}</td>
@@ -598,60 +605,70 @@ async function renderEff(q) {
   const quick = (l, s, e) => `<a class="btn btn-outline-secondary btn-sm" href="${link('eff', { ...f, start: s, end: e })}">${l}</a>`;
   mount('eff', `<form id="ef" class="panel"><div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2"><h5 class="m-0">Efficiency &amp; Fine Report</h5>
     <div class="d-flex gap-1 flex-wrap">${quick('Yesterday', y, y)}${quick('Last 7 days', L.addDays(t, -7), y)}${quick('This month', ms, t)}${quick('Last month', lme.slice(0, 8) + '01', lme)}<button type="button" class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
-    <div class="row g-2">${filterBar(f, `<div class="col-md-2"><label class="form-label small fw-bold">Group by</label><select name="group_by" class="form-select form-select-sm">
-      ${[['user', 'User'], ['department', 'Department'], ['checklist', 'Check List'], ['branch', 'Branch'], ['task_type', 'Task Type'], ['date', 'Date']].map(([v, l]) => `<option value="${v}" ${f.group_by === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`)}</div>
+    <div class="row g-2">${filterBar(f, `<div class="col-md-2"><label class="form-label small fw-bold">Group by</label>${groupSel('group_by', f.group_by, L.GROUP_BY)}</div>
+      <div class="col-md-2"><label class="form-label small fw-bold">Sub group</label>${groupSel('sub_group', f.sub_group, L.GROUP_BY, '— none —')}</div>`)}</div>
     <button class="btn btn-primary w-100 mt-2 btn-sm">Generate</button>
-    <div class="small muted mt-1">Efficiency % = TRUE ÷ (TRUE + FALSE). Unmarked tasks are saved as FALSE automatically the next day. Tasks ticked on a day they were not due ("Extra") are not counted.</div></form>
+    <div class="small muted mt-1">Efficiency % = TRUE ÷ (TRUE + FALSE). Unmarked tasks are saved as FALSE automatically the next day. Tasks ticked on a day they were not due ("Extra") and pure Trigger tasks are not counted.</div></form>
     <div class="panel" id="out">${loading}</div>`);
   $('ef').onsubmit = (ev) => { ev.preventDefault(); go('eff', readForm(ev.target)); };
   const my = S.seq;
   const recs = await fetchRecords(f.start, f.end, S.isAdmin ? L.norm(f.user) : null);
   if (my !== S.seq) return;
   const d = L.efficiency(recs, f, S.settings, salaries(), S.isAdmin ? null : S.prof.username);
-  $('btnExp').onclick = () => exportXlsx(`Efficiency_${f.start}_to_${f.end}`, [d.group_by, 'Scheduled', 'Done (TRUE)', 'Missed (FALSE)', 'Efficiency %', 'Grade', 'Per-task Fine', 'Salary', 'Deduct %', '% Fine', 'Auditor Fine', 'Dept Incomplete', 'Dept Fine'],
-    d.rows.map((r) => [r.key, r.total, r.done, r.missed, r.pct, r.grade, r.task_fine, r.salary, r.deduct_pct, r.pct_fine, r.total_fine, r.incomplete, r.dept_fine]));
+  const gLabel = (k) => (L.GROUP_BY.find(([v]) => v === k) || [k, k])[1];
+  const xrow = (r, sub) => [r.key, sub, r.total, r.done, r.missed, r.pct, r.grade, r.task_fine, r.salary, r.deduct_pct, r.pct_fine, r.total_fine, r.incomplete, r.dept_fine];
+  $('btnExp').onclick = () => exportXlsx(`Efficiency_${f.start}_to_${f.end}`, [gLabel(d.group_by), d.sub_group ? gLabel(d.sub_group) : 'Sub group', 'Scheduled', 'Done (TRUE)', 'Missed (FALSE)', 'Efficiency %', 'Grade', 'Per-task Fine', 'Salary', 'Deduct %', '% Fine', 'Auditor Fine', 'Dept Incomplete', 'Dept Fine'],
+    d.rows.flatMap((r) => [xrow(r, d.sub_group ? 'ALL' : ''), ...(r.children || []).map((c) => xrow({ ...c, salary: '', deduct_pct: '', pct_fine: '' }, c.sub))]));
+  const effRow = (g, isSub) => `<tr class="${isSub ? 'sub-row' : d.sub_group ? 'grp-total' : ''}"><td>${isSub ? '' : `<b>${esc(g.key)}</b>`}</td>${d.sub_group ? `<td>${isSub ? esc(g.sub) : '<span class="muted">All</span>'}</td>` : ''}<td>${g.total}</td><td class="text-success">${g.done}</td><td class="text-danger">${g.missed}</td><td>${pctBar(g.pct)}</td><td class="grade">${esc(g.grade)}</td><td>${money(g.task_fine)}</td>${d.show_pct ? (isSub ? '<td></td><td></td><td></td>' : `<td>${money(g.salary)}</td><td>${g.deduct_pct}%</td><td>${money(g.pct_fine)}</td>`) : ''}<td><b>${money(g.total_fine)}</b></td><td>${g.incomplete || ''}</td><td>${g.dept_fine ? '<b class="text-warning">' + money(g.dept_fine) + '</b>' : ''}</td></tr>`;
   $('out').innerHTML = `<div class="mb-2"><span class="badge bg-secondary">Scheduled: ${d.totals.total}</span> <span class="badge bg-success">Done: ${d.totals.done}</span> <span class="badge bg-danger">Missed: ${d.totals.missed}</span> <span class="badge bg-primary">Efficiency: ${d.totals.pct}%</span> <span class="badge bg-dark">Auditor fine: Rs ${money(d.totals.total_fine)}</span> <span class="badge bg-warning text-dark">Dept incomplete: ${d.totals.incomplete} · Dept fine: Rs ${money(d.totals.dept_fine)}</span> <span class="small muted">Fine mode: ${esc(d.mode)}</span></div>
-    <div class="table-wrap">${d.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>${esc(d.group_by.replace('_', ' '))}</th><th>Scheduled</th><th>Done (TRUE)</th><th>Missed (FALSE)</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Per-task Fine</th>${d.show_pct ? '<th>Salary</th><th>Deduct %</th><th>% Fine</th>' : ''}<th>Auditor Fine</th><th>Dept Incomplete</th><th>Dept Fine</th></tr></thead><tbody>
-    ${d.rows.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.total}</td><td class="text-success">${g.done}</td><td class="text-danger">${g.missed}</td><td>${pctBar(g.pct)}</td><td class="grade">${esc(g.grade)}</td><td>${money(g.task_fine)}</td>${d.show_pct ? `<td>${money(g.salary)}</td><td>${g.deduct_pct}%</td><td>${money(g.pct_fine)}</td>` : ''}<td><b>${money(g.total_fine)}</b></td><td>${g.incomplete || ''}</td><td>${g.dept_fine ? '<b class="text-warning">' + money(g.dept_fine) + '</b>' : ''}</td></tr>`).join('')}
+    <div class="table-wrap">${d.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>${esc(gLabel(d.group_by))}</th>${d.sub_group ? `<th>${esc(gLabel(d.sub_group))}</th>` : ''}<th>Scheduled</th><th>Done (TRUE)</th><th>Missed (FALSE)</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Per-task Fine</th>${d.show_pct ? '<th>Salary</th><th>Deduct %</th><th>% Fine</th>' : ''}<th>Auditor Fine</th><th>Dept Incomplete</th><th>Dept Fine</th></tr></thead><tbody>
+    ${d.rows.map((g) => effRow(g, false) + (g.children || []).map((c) => effRow(c, true)).join('')).join('')}
     </tbody></table>` : '<div class="text-center p-4 muted">No records in this range.</div>'}</div>`;
 }
 
 async function renderMonthly(q) {
-  const ym = q.month || today().slice(0, 7);
+  const t0 = today();
+  const start = q.start || t0.slice(0, 8) + '01', end = q.end || t0;
+  const ym = start.slice(0, 7);
+  const label = `${start} → ${end}`;
+  const ms0 = t0.slice(0, 8) + '01', lme0 = L.addDays(ms0, -1);
+  const quickM = (l, s, e) => `<a class="btn btn-outline-secondary btn-sm" href="${link('monthly', { ...q, start: s, end: e })}">${l}</a>`;
   const viewLc = S.isAdmin ? L.norm(q.user || '') : S.prof.username_lc;
-  mount('monthly', `<div class="panel"><div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2"><h5 class="m-0">Monthly Performance</h5>
-    <div class="d-flex gap-1">${S.isAdmin ? '<button class="btn btn-outline-secondary btn-sm" id="btnSave">💾 Save month-end snapshot</button>' : ''}<button class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
-    <form id="mf" class="row g-2 align-items-end"><div class="col-md-2"><label class="form-label small fw-bold">Month</label><input type="month" name="month" value="${ym}" class="form-control form-control-sm"></div>
-    ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(S.users.map((u) => u.username), q.user || '', 'All users')}</select></div>` : ''}
-    <div class="col-md-2"><button class="btn btn-primary btn-sm w-100">Show</button></div><div class="col-md-6 small muted" id="mInfo"></div></form></div>
+  mount('monthly', `<div class="panel"><div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2"><h5 class="m-0">Performance Report</h5>
+    <div class="d-flex gap-1 flex-wrap">${quickM('This month', ms0, t0)}${quickM('Last month', lme0.slice(0, 8) + '01', lme0)}${S.isAdmin ? `<button class="btn btn-outline-secondary btn-sm" id="btnSave" title="Saves the full month of the start date">💾 Save snapshot of ${ym}</button>` : ''}<button class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
+    <form id="mf" class="row g-2 align-items-end"><div class="col-md-2"><label class="form-label small fw-bold">Start Date</label><input type="date" name="start" value="${start}" class="form-control form-control-sm"></div>
+    <div class="col-md-2"><label class="form-label small fw-bold">End Date</label><input type="date" name="end" value="${end}" class="form-control form-control-sm"></div>
+    ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(S.users.filter((u) => u.role !== 'Department').map((u) => u.username), q.user || '', 'All users')}</select></div>` : ''}
+    <div class="col-md-2"><button class="btn btn-primary btn-sm w-100">Show</button></div><div class="col-md-4 small muted" id="mInfo"></div></form></div>
     <div class="panel"><div class="table-wrap" id="out">${loading}</div></div>`);
   $('mf').onsubmit = (ev) => { ev.preventDefault(); go('monthly', readForm(ev.target)); };
-  const { start, end } = L.monthBounds(ym);
   const my = S.seq;
+  if (start > end) { $('out').innerHTML = '<div class="text-center p-4 text-danger">Start date is after the end date.</div>'; return; }
   const recs = await fetchRecords(start, end, viewLc || null);
-  const m = L.monthly(recs, ym, S.settings, salaries(), viewLc ? (S.users.find((u) => u.username_lc === viewLc)?.username || S.prof.username) : null);
+  const m = L.monthly(recs, { start, end }, S.settings, salaries(), viewLc ? (S.users.find((u) => u.username_lc === viewLc)?.username || S.prof.username) : null);
   const snap = await getDoc(doc(db, 'monthly', ym)).catch(() => null);
   if (my !== S.seq) return;
   $('mInfo').innerHTML = `Fine mode: <b>${esc(m.mode)}</b> · ${snap && snap.exists() ? 'Month-end snapshot saved on ' + esc(snap.data().generated_at) : 'Snapshot saves automatically on the 1st of next month'}`;
   if ($('btnSave')) $('btnSave').onclick = async () => {
-    if (!await askConfirm(`Save / overwrite the month-end snapshot of ${ym}?`)) return;
-    try { const all = await fetchRecords(start, end, null, true); const n = await saveMonthly(ym, all); log('SAVE_MONTHLY', ym); toast(`Saved ${n} users`); renderMonthly(q); } catch (e) { fail(e); }
+    if (!await askConfirm(`Save / overwrite the month-end snapshot of the full month ${ym}?`)) return;
+    const mb = L.monthBounds(ym);
+    try { const all = await fetchRecords(mb.start, mb.end, null, true); const n = await saveMonthly(ym, all); log('SAVE_MONTHLY', ym); toast(`Saved ${n} users`); renderMonthly(q); } catch (e) { fail(e); }
   };
   $('btnExp').onclick = () => {
     const rows = [];
     m.rows.forEach((u) => {
-      rows.push([ym, u.key, 'ALL', u.total, u.done, u.missed, u.pct, u.grade, u.salary, u.task_fine, u.deduct_pct, u.pct_fine, u.total_fine]);
-      u.departments.forEach((d) => rows.push([ym, u.key, d.department, d.total, d.done, d.missed, d.pct, '', '', '', '', '', '']));
+      rows.push([label, u.key, 'ALL', u.total, u.done, u.missed, u.pct, u.grade, u.salary, u.task_fine, u.deduct_pct, u.pct_fine, u.total_fine]);
+      u.departments.forEach((d) => rows.push([label, u.key, d.department, d.total, d.done, d.missed, d.pct, '', '', '', '', '', '']));
     });
-    m.dept_fines.forEach((d) => rows.push([ym, 'DEPARTMENT FINE', d.key, d.checked, d.complete, d.incomplete, '', '', '', '', '', '', d.fine]));
-    exportXlsx('Monthly_Performance_' + ym, ['Month', 'User', 'Department', 'Scheduled / Checked', 'Done / Complete', 'Missed / Incomplete', 'Efficiency %', 'Grade', 'Salary', 'Per-task Fine', 'Deduct %', '% Fine', 'Total Fine'], rows);
+    m.dept_fines.forEach((d) => rows.push([label, 'DEPARTMENT FINE', d.key, d.checked, d.complete, d.incomplete, '', '', '', '', '', '', d.fine]));
+    exportXlsx(`Performance_${start}_to_${end}`, ['Period', 'User', 'Department', 'Scheduled / Checked', 'Done / Complete', 'Missed / Incomplete', 'Efficiency %', 'Grade', 'Salary', 'Per-task Fine', 'Deduct %', '% Fine', 'Total Fine'], rows);
   };
   $('out').innerHTML = m.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>#</th><th>User</th><th>Scheduled</th><th>Done</th><th>Missed</th><th style="min-width:170px">Efficiency</th><th>Grade</th><th>Salary</th><th>Per-task Fine</th><th>Deduct %</th><th>% Fine</th><th>Total Fine</th><th></th></tr></thead><tbody>
     ${m.rows.map((u, i) => `<tr><td>${i + 1}</td><td><b>${esc(u.key)}</b></td><td>${u.total}</td><td class="text-success">${u.done}</td><td class="text-danger">${u.missed}</td><td>${pctBar(u.pct)}</td><td class="grade">${esc(u.grade)}</td><td>${money(u.salary)}</td><td>${money(u.task_fine)}</td><td>${u.deduct_pct}%</td><td>${money(u.pct_fine)}</td><td><b>${money(u.total_fine)}</b></td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Details</button></td></tr>`).join('')}
-    </tbody></table>` : '<div class="text-center p-4 muted">No records for this month.</div>';
+    </tbody></table>` : '<div class="text-center p-4 muted">No records in this date range.</div>';
   if (m.dept_fines.length) {
     $('out').insertAdjacentHTML('beforeend', `<h6 class="mt-3">🏢 Department fines (auditor ticked TRUE and marked the department "Incomplete")</h6>
-      <table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>Company · Department</th><th>Checked (TRUE)</th><th>Complete</th><th>Incomplete</th><th>Dept Fine (Rs)</th><th></th></tr></thead><tbody>
+      <table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>Organization · Department</th><th>Checked (TRUE)</th><th>Complete</th><th>Incomplete</th><th>Dept Fine (Rs)</th><th></th></tr></thead><tbody>
       ${m.dept_fines.map((d, i) => `<tr><td><b>${esc(d.key)}</b></td><td>${d.checked}</td><td class="text-success">${d.complete}</td><td class="text-warning">${d.incomplete}</td><td><b>${money(d.fine)}</b></td><td>${d.incomplete ? `<button class="btn btn-sm btn-outline-warning py-0" data-df="${i}">Details</button>` : ''}</td></tr>`).join('')}
       </tbody></table>`);
   }
@@ -659,17 +676,352 @@ async function renderMonthly(q) {
     const df = ev.target.closest('[data-df]');
     if (df) {
       const d = m.dept_fines[+df.dataset.df];
-      showModal(`${d.key} — Incomplete (${ym})`, `<table class="table table-sm table-striped"><thead><tr><th>Date</th><th>Check List</th><th>Task</th><th>Auditor</th><th>Remarks</th><th>Pictures</th></tr></thead><tbody>
+      showModal(`${d.key} — Incomplete (${label})`, `<table class="table table-sm table-striped"><thead><tr><th>Date</th><th>Check List</th><th>Task</th><th>Auditor</th><th>Remarks</th><th>Pictures</th></tr></thead><tbody>
         ${d.items.map((x) => `<tr><td class="text-nowrap">${x.date}</td><td>${esc(x.checklist)}</td><td>${esc(x.task_type)}</td><td>${esc(x.user)}</td><td>${esc(x.remarks)}</td><td>${x.evidence || ''}</td></tr>`).join('')}</tbody></table>`);
       return;
     }
     const b = ev.target.closest('[data-i]'); if (!b) return;
     const u = m.rows[+b.dataset.i];
-    showModal(`${u.key} — ${ym}`, `<h6>Department wise</h6><table class="table table-sm table-bordered"><thead><tr><th>Department</th><th>Scheduled</th><th>Done</th><th>Missed</th><th>Efficiency</th></tr></thead><tbody>
+    showModal(`${u.key} — ${label}`, `<h6>Department wise</h6><table class="table table-sm table-bordered"><thead><tr><th>Department</th><th>Scheduled</th><th>Done</th><th>Missed</th><th>Efficiency</th></tr></thead><tbody>
       ${u.departments.map((d) => `<tr><td>${esc(d.department)}</td><td>${d.total}</td><td>${d.done}</td><td>${d.missed}</td><td>${pctBar(d.pct)}</td></tr>`).join('')}</tbody></table>
       <h6>Tasks not done (${u.missed_list.length})</h6><table class="table table-sm table-striped"><thead><tr><th>Date</th><th>Department</th><th>Check List</th><th>Task</th><th>Remarks</th></tr></thead><tbody>
       ${u.missed_list.map((x) => `<tr><td class="text-nowrap">${x.date}</td><td>${esc(x.department)}</td><td>${esc(x.checklist)}</td><td>${esc(x.task_type)}</td><td>${esc(x.remarks)}</td></tr>`).join('')}</tbody></table>`);
   };
+}
+
+// ------------------------------------------------------------------ audit issues (auditor raises → department clears → auditor verifies)
+const ISSUE_ST_BADGE = { Open: 'danger', Reopened: 'danger', Done: 'warning text-dark', Verified: 'success' };
+const issueStatusLabel = (st) => (st === 'Done' ? 'Done — waiting audit check' : st === 'Open' ? 'Pending' : st === 'Reopened' ? 'Reopened (not cleared)' : st);
+const typeBadge = (t) => (t === 'Major' ? '<span class="badge bg-danger">⚠ Major</span>' : '<span class="badge bg-secondary">Minor</span>');
+const short = (x, n = 90) => { const v = String(x || ''); return v.length > n ? v.slice(0, n) + '…' : v; };
+const canManage = (i) => S.isAdmin || (S.isAuditor && i.created_by_lc === S.prof.username_lc);
+
+function issueQuery() {
+  return S.isDept ? query(collection(db, 'issues'), where('dept_lc', '==', S.prof.dept_lc || '-')) : collection(db, 'issues');
+}
+function stopIssueWatch() { if (S.issueUnsub) { S.issueUnsub(); S.issueUnsub = null; } S.issues = null; }
+function startIssueWatch() {
+  stopIssueWatch();
+  let first = true;
+  S.issueUnsub = onSnapshot(issueQuery(), (snap) => {
+    const mineCo = L.norm(S.prof.company || '');
+    S.issues = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => !S.isDept || !mineCo || L.norm(i.company) === mineCo);
+    if (!first) snap.docChanges().forEach((ch) => { if (ch.type !== 'removed') issueNotify({ id: ch.doc.id, ...ch.doc.data() }); });
+    first = false;
+    updateIssueBadge();
+    if (S.onIssues) S.onIssues();
+  }, (e) => console.warn('issues', e));
+}
+/** Items that need this login's attention (shown as a red number on the tab). */
+function issueAttention() {
+  if (!S.issues) return 0;
+  if (S.isDept) return S.issues.filter((i) => L.ISSUE_PENDING.includes(i.status)).length;
+  return S.issues.filter((i) => canManage(i) && (i.status === 'Done' || i.auditor_alert)).length;
+}
+function updateIssueBadge() {
+  const n = issueAttention();
+  const b = $('issueBadge');
+  if (b) { b.textContent = n || ''; b.classList.toggle('d-none', !n); }
+  document.title = (n ? `(${n}) ` : '') + S.settings.APP_TITLE;
+}
+function notify(title, body, major = false) {
+  toast(`${title} — ${body}`, major ? 'danger' : 'info');
+  try { if (navigator.vibrate) navigator.vibrate(major ? [200, 100, 200] : 150); } catch (e) { /* ignore */ }
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.ready.then((r) => r.showNotification(title, { body }));
+      else new Notification(title, { body });
+    }
+  } catch (e) { /* phones without a service worker: the toast above is shown instead */ }
+}
+function issueNotify(i) {
+  const last = (i.history || [])[i.history.length - 1];
+  if (!last || last.by_lc === S.prof.username_lc) return;
+  if (Date.now() - (last.ms || 0) > 5 * 60 * 1000) return;           // only fresh events
+  if (!S.isDept && !canManage(i)) return;
+  notify(`${i.type === 'Major' ? '⚠ MAJOR ' : ''}${i.no} — ${last.action}`, `${i.company} · ${i.department}${last.note ? ': ' + short(last.note, 80) : ''}`, i.type === 'Major');
+}
+const histEntry = (action, note = '') => ({ ts: nowText(), ms: Date.now(), by: S.prof.username, by_lc: S.prof.username_lc, role: S.prof.role, action, note: String(note || '').slice(0, 500) });
+
+async function uploadIssueFile(file, issue, side) {
+  const img = await compressImage(file);
+  const ref = await addDoc(collection(db, 'issue_files'), { issue_id: issue.id || '', dept_lc: issue.dept_lc, side, data: img.data, w: img.w, h: img.h, by: S.prof.username, ts: nowText() });
+  return ref.id;
+}
+async function filesHtml(ids) {
+  if (!ids || !ids.length) return '<span class="muted">No picture.</span>';
+  const docs = await Promise.all(ids.map((id) => getDoc(doc(db, 'issue_files', id)).catch(() => null)));
+  return `<div class="d-flex flex-wrap gap-2">${docs.filter((d) => d && d.exists()).map((d) => { const x = d.data();
+    return `<figure class="m-0"><img src="${x.data}" class="iss-thumb rounded border" alt="evidence" title="Click to enlarge"><figcaption class="small muted">${esc(x.by)} · ${esc(x.ts)}</figcaption></figure>`; }).join('')}</div>`;
+}
+function mailIssue(i) {
+  const to = String(S.settings.OWNER_EMAILS || '').split(',').map((x) => x.trim()).filter(Boolean).join(',');
+  if (!to) toast('Set the ownership e-mail in Settings → OWNER_EMAILS. The mail opens without "To".', 'warning');
+  const a = L.issueAge(i, today());
+  const body = [`Audit issue ${i.no} (${i.type})`, `Organization: ${i.company}${i.branch ? ' / ' + i.branch : ''}`, `Department: ${i.department}`,
+    `Raised by: ${i.created_by} on ${i.created_at}`, `Status: ${issueStatusLabel(i.status)}`, `Due date: ${i.due_date || 'not set yet'}`, `Pending days: ${a.days_open}`, '',
+    'ISSUE:', i.detail, '', 'RECOMMENDATION:', i.recommendation, '', `Pictures: ${(i.evidence_ids || []).length} (see the portal)`, location.origin + location.pathname + '#/issues'].join('\n');
+  const url = `mailto:${encodeURIComponent(to).replace(/%2C/g, ',')}?subject=${encodeURIComponent(`[${i.type} audit issue] ${i.no} — ${i.company} ${i.department}`)}&body=${encodeURIComponent(body.slice(0, 1700))}`;
+  const aEl = document.createElement('a'); aEl.href = url; aEl.click();
+}
+
+function issueFilterOpts() {
+  const Ls = L.listings(S.tasks);
+  const fromIssues = (k) => (S.issues || []).map((i) => i[k]).filter(Boolean);
+  const uniq = (a) => [...new Set(a)].sort((x, y) => String(x).localeCompare(String(y)));
+  return { departments: uniq([...Ls.depart, ...fromIssues('department')]), branches: uniq([...Ls.branch, ...fromIssues('branch')]), raisers: uniq(fromIssues('created_by')) };
+}
+
+async function renderIssues(q) {
+  mount('issues', loading);
+  S.onIssues = () => drawIssues(q);
+  if (S.issues) drawIssues(q);
+}
+function drawIssues(q) {
+  if (!$('main')) return;
+  const t = today();
+  const tab = q.tab || 'pending';
+  const all = (S.issues || []).filter((i) => (!q.company || i.company === q.company) && (!q.department || i.department === q.department)
+    && (!q.type || i.type === q.type) && (!q.q || L.norm([i.no, i.detail, i.recommendation, i.department, i.dept_remarks].join(' ')).includes(L.norm(q.q))));
+  const inTab = { pending: (i) => L.ISSUE_PENDING.includes(i.status), done: (i) => i.status === 'Done', verified: (i) => i.status === 'Verified', all: () => true };
+  const list = all.filter(inTab[tab] || inTab.pending).map((i) => ({ ...i, age: L.issueAge(i, t) }))
+    .sort((a, b) => (b.type === 'Major') - (a.type === 'Major') || (a.created_at < b.created_at ? -1 : 1));
+  if (tab === 'verified' || tab === 'all') list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const pend = all.filter(inTab.pending);
+  const cnt = { pending: pend.length, major: pend.filter((i) => i.type === 'Major').length, overdue: pend.filter((i) => L.issueAge(i, t).overdue_days).length,
+    nodue: pend.filter((i) => !i.due_date).length, done: all.filter(inTab.done).length, verified: all.filter(inTab.verified).length };
+  const tabs = S.isDept ? [['pending', 'Pending', cnt.pending], ['done', 'Done (waiting audit check)', cnt.done], ['verified', 'Verified / Closed', cnt.verified]]
+    : [['pending', 'Pending', cnt.pending], ['done', 'Done — verify', cnt.done], ['verified', 'Verified', cnt.verified], ['all', 'All', all.length]];
+  const qs = { company: q.company, department: q.department, type: q.type, q: q.q };
+  const card = (cls, lbl, v) => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val">${v}</div></div></div>`;
+  const newMajor = S.isDept ? pend.filter((i) => i.type === 'Major' && !i.dept_seen) : [];
+  const alerts = S.isDept ? [] : (S.issues || []).filter((i) => canManage(i) && i.auditor_alert);
+  const td = (label, html, cls = '') => `<td data-label="${label}" class="${cls}">${html}</td>`;
+  const canAsk = 'Notification' in window && Notification.permission === 'default';
+  $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-amber', 'Pending', cnt.pending)}${card('bg-red', 'Major pending', cnt.major)}${card('bg-red', 'Overdue', cnt.overdue)}${card('bg-slate', 'No due date yet', cnt.nodue)}${card('bg-blue', S.isDept ? 'Done (waiting check)' : 'Waiting your check', cnt.done)}${card('bg-green', 'Verified', cnt.verified)}</div>
+    ${newMajor.length ? `<div class="alert alert-danger py-2 mb-2 blink-soft">⚠ <b>${newMajor.length} new MAJOR issue(s)</b> for your department: ${newMajor.map((i) => `<button class="btn btn-sm btn-danger py-0 ms-1 iss-open" data-id="${i.id}">${esc(i.no)}</button>`).join('')} — please set a due date.</div>` : ''}
+    ${alerts.length ? `<div class="alert alert-info py-2 mb-2">🔔 Department updates: ${alerts.map((i) => `<button class="btn btn-sm btn-outline-dark py-0 ms-1 iss-open" data-id="${i.id}">${esc(i.no)} · ${esc(i.auditor_alert)}</button>`).join('')}</div>` : ''}
+    <div class="panel"><form id="isf" class="d-flex flex-wrap gap-2 align-items-center">
+      ${S.isAuditor ? '<a class="btn btn-danger btn-sm" href="#/issues/new">＋ Raise Audit Issue</a>' : ''}
+      <input name="q" value="${esc(q.q || '')}" class="form-control form-control-sm" style="max-width:220px" placeholder="Search no / issue / remarks…">
+      <select name="company" class="form-select form-select-sm" style="width:auto">${opt(L.SHEET_LISTS.company, q.company || '', 'RC & RCG')}</select>
+      ${S.isDept ? '' : `<select name="department" class="form-select form-select-sm" style="width:auto">${opt(issueFilterOpts().departments, q.department || '', 'All departments')}</select>`}
+      <select name="type" class="form-select form-select-sm" style="width:auto">${opt(L.ISSUE_TYPES, q.type || '', 'Minor & Major')}</select>
+      <input type="hidden" name="tab" value="${tab}"><button class="btn btn-outline-primary btn-sm">Filter</button>
+      ${canAsk ? '<button type="button" class="btn btn-outline-warning btn-sm" id="btnNotif">🔔 Turn on alerts</button>' : ''}
+      <a class="btn btn-outline-info btn-sm ms-auto" href="#/ireport">📊 Issue Reports</a></form>
+      ${S.isDept ? `<div class="small muted mt-1">Department: <b>${esc(S.prof.department)}</b>${S.prof.company ? ' · ' + esc(S.prof.company) : ' · RC & RCG'}. Open an issue → set the due date → fix it → write remarks, add pictures → <b>Mark Done</b>. The auditor then verifies it.</div>` : ''}</div>
+    <ul class="nav nav-pills mb-2 gap-1">${tabs.map(([k, l, n]) => `<li class="nav-item"><a class="nav-link py-1 ${tab === k ? 'active' : ''}" href="${link('issues', { ...qs, tab: k })}">${l} <span class="badge bg-light text-dark">${n}</span></a></li>`).join('')}</ul>
+    <div class="panel"><div class="table-wrap">${list.length ? `<table class="table table-sm table-bordered table-hover tbl tbl-cards mb-0"><thead><tr><th>No</th><th>Raised on</th><th>Organization</th><th>Department</th><th>Type</th><th>Issue</th><th>Raised by</th><th>Due date</th><th>Pending days</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((i) => `<tr class="${i.type === 'Major' ? 'iss-major' : ''} ${S.isDept && !i.dept_seen && i.age.pending ? 'iss-new' : ''}">
+        ${td('No', `<b>${esc(i.no)}</b>${S.isDept && !i.dept_seen && i.age.pending ? ' <span class="badge bg-warning text-dark">NEW</span>' : ''}`, 'm-title')}
+        ${td('Raised on', esc(i.created_date))}${td('Organization', esc(i.company) + (i.branch ? ' / ' + esc(i.branch) : ''))}${td('Department', esc(i.department))}
+        ${td('Type', typeBadge(i.type))}${td('Issue', esc(short(i.detail)))}${td('Raised by', esc(i.created_by))}
+        ${td('Due date', i.due_date ? `${esc(i.due_date)}${i.age.overdue_days ? ` <span class="badge bg-danger">${i.age.late ? 'late' : 'overdue'} ${i.age.overdue_days}d</span>` : ''}` : '<span class="text-warning">not set</span>')}
+        ${td('Pending days', `<b>${i.age.days_open}</b> day(s)${i.age.cleared ? `<div class="small muted">cleared ${esc(i.age.cleared)}</div>` : ''}`)}
+        ${td('Status', `<span class="badge bg-${ISSUE_ST_BADGE[i.status] || 'secondary'}">${esc(issueStatusLabel(i.status))}</span>`)}
+        ${td('', `<button class="btn btn-sm btn-primary py-0 iss-open" data-id="${i.id}">Open</button>`)}</tr>`).join('')}
+      </tbody></table>` : `<div class="text-center p-4 muted">${S.issues ? 'Nothing here.' : 'Loading…'}</div>`}</div></div>`;
+  $('isf').onsubmit = (ev) => { ev.preventDefault(); go('issues', readForm(ev.target)); };
+  if ($('btnNotif')) $('btnNotif').onclick = async () => { try { await Notification.requestPermission(); } catch (e) { /* ignore */ } drawIssues(q); };
+  $('main').onclick = (ev) => { const b = ev.target.closest('.iss-open'); if (b) openIssue(b.dataset.id); };
+}
+
+async function renderIssueForm() {
+  if (!S.isAuditor) return go('issues');
+  const o = issueFilterOpts();
+  mount('issues', `<form id="nif" class="panel" style="max-width:900px"><div class="d-flex justify-content-between align-items-center mb-2"><h5 class="m-0">Raise Audit Issue</h5><a class="btn btn-sm btn-outline-secondary" href="#/issues">← Back</a></div>
+    <div class="row g-2">
+      <div class="col-md-3"><label class="form-label fw-semibold">Organization <span class="text-danger">*</span></label><select name="company" class="form-select form-select-sm" required>${opt(L.SHEET_LISTS.company, '', '— select —')}</select></div>
+      <div class="col-md-3"><label class="form-label fw-semibold">Department <span class="text-danger">*</span></label><select name="department" class="form-select form-select-sm" required>${opt(o.departments, '', '— select —')}</select></div>
+      <div class="col-md-3"><label class="form-label fw-semibold">Branch</label><select name="branch" class="form-select form-select-sm">${opt(o.branches, '', '— optional —')}</select></div>
+      <div class="col-md-3"><label class="form-label fw-semibold">Issue type <span class="text-danger">*</span></label><div class="d-flex gap-3 pt-1">
+        <div class="form-check"><input class="form-check-input" type="radio" name="type" id="tMin" value="Minor" checked><label class="form-check-label" for="tMin">Minor</label></div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="type" id="tMaj" value="Major"><label class="form-check-label text-danger fw-bold" for="tMaj">⚠ Major</label></div></div></div>
+      <div class="col-md-12"><label class="form-label fw-semibold">E-mail this point to ownership?</label><div class="d-flex gap-3">
+        <div class="form-check"><input class="form-check-input" type="radio" name="email_owner" id="eN" value="No" checked><label class="form-check-label" for="eN">No</label></div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="email_owner" id="eY" value="Yes"><label class="form-check-label" for="eY">Yes — open an e-mail to ${esc(S.settings.OWNER_EMAILS || '(set OWNER_EMAILS in Settings)')}</label></div></div></div>
+      <div class="col-12"><label class="form-label fw-semibold">Issue detail <span class="text-danger">*</span></label><textarea name="detail" rows="4" class="form-control" required placeholder="What did you find? Where, when, how much…"></textarea></div>
+      <div class="col-12"><label class="form-label fw-semibold">Recommendation <span class="text-danger">*</span></label><textarea name="recommendation" rows="3" class="form-control" required placeholder="What should the department do to clear it?"></textarea></div>
+      <div class="col-12"><label class="form-label fw-semibold">Evidence pictures <span class="muted fw-normal">(up to 5 — camera opens on mobile)</span></label>
+        <div class="d-flex gap-2 align-items-center flex-wrap"><button type="button" class="btn btn-outline-secondary btn-sm" id="pickPic">📷 Add picture</button><input type="file" accept="image/*" capture="environment" multiple class="d-none" id="picIn"><div id="picPrev" class="d-flex gap-2 flex-wrap"></div></div></div>
+    </div>
+    <div id="nerr" class="text-danger small mt-2"></div>
+    <button class="btn btn-danger mt-3 px-4" id="nSubmit">Submit issue</button></form>`);
+  const files = [];
+  const prev = () => { $('picPrev').innerHTML = files.map((f, k) => `<span class="badge text-bg-light border p-1">🖼 ${esc(f.name.slice(0, 18))} <a href="#" data-k="${k}" class="text-danger ms-1 rmPic">✕</a></span>`).join(''); };
+  $('pickPic').onclick = () => $('picIn').click();
+  $('picIn').onchange = (ev) => { [...ev.target.files].forEach((f) => { if (files.length < 5) files.push(f); }); ev.target.value = ''; prev(); };
+  $('picPrev').onclick = (ev) => { const a = ev.target.closest('.rmPic'); if (a) { ev.preventDefault(); files.splice(+a.dataset.k, 1); prev(); } };
+  $('nif').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const v = readForm(ev.target);
+    const btn = $('nSubmit'); btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      if (!v.detail.trim() || !v.recommendation.trim()) throw new Error('Issue detail and recommendation are required.');
+      const dept_lc = L.norm(v.department);
+      const ids = [];
+      for (const f of files) ids.push(await uploadIssueFile(f, { dept_lc }, 'auditor'));
+      const n = await runTransaction(db, async (tx) => {
+        const ref = doc(db, 'counters', 'issues');
+        const c = await tx.get(ref);
+        const next = (c.exists() ? Number(c.data().n) || 0 : 0) + 1;
+        tx.set(ref, { n: next });
+        return next;
+      });
+      const ts = nowText();
+      const issue = { no: 'AUD-' + String(n).padStart(4, '0'), seq: n, company: v.company, branch: v.branch || '', department: v.department, dept_lc,
+        type: v.type === 'Major' ? 'Major' : 'Minor', email_owner: v.email_owner === 'Yes', emailed: false,
+        detail: v.detail.trim().slice(0, 4000), recommendation: v.recommendation.trim().slice(0, 4000), evidence_ids: ids,
+        created_by: S.prof.username, created_by_lc: S.prof.username_lc, created_at: ts, created_date: today(), status: 'Open',
+        due_date: '', due_set_by: '', due_set_at: '', dept_remarks: '', dept_evidence_ids: [], done_by: '', done_at: '', done_date: '',
+        verify_remarks: '', verified_by: '', verified_at: '', verified_date: '', dept_seen: false, auditor_alert: '', updated_at: ts,
+        history: [histEntry('Raised', `${v.type} issue raised`)] };
+      const ref = await addDoc(collection(db, 'issues'), issue);
+      log('RAISE_ISSUE', `${issue.no} ${issue.department}`);
+      toast(`${issue.no} raised for ${issue.department}`);
+      if (issue.email_owner) {
+        mailIssue({ ...issue, id: ref.id });
+        await updateDoc(doc(db, 'issues', ref.id), { emailed: true, history: arrayUnion(histEntry('E-mail to ownership opened')) }).catch(() => {});
+      }
+      go('issues');
+    } catch (e) { $('nerr').textContent = friendly(e); btn.disabled = false; btn.textContent = 'Submit issue'; }
+  };
+}
+
+async function openIssue(id) {
+  const i = (S.issues || []).find((x) => x.id === id);
+  if (!i) return toast('Issue not found', 'warning');
+  const t = today(), a = L.issueAge(i, t);
+  const pending = L.ISSUE_PENDING.includes(i.status);
+  const row = (k, v) => `<div class="col-6 col-md-4"><div class="small muted">${k}</div><div class="fw-semibold">${v}</div></div>`;
+  let actions = '';
+  if (S.isDept && pending) {
+    actions = `<div class="iss-box"><h6>Your action</h6>
+      <div class="row g-2 align-items-end"><div class="col-md-5"><label class="form-label small fw-bold">Due date (when it will be cleared)</label><input type="date" id="ixDue" class="form-control form-control-sm" min="${t}" value="${esc(i.due_date)}"></div>
+      <div class="col-md-4"><button class="btn btn-sm btn-primary w-100" id="ixSaveDue">${i.due_date ? 'Change due date' : 'Save due date'}</button></div></div>
+      <label class="form-label small fw-bold mt-3">Remarks — what was done to clear it <span class="text-danger">*</span></label><textarea id="ixRem" rows="3" class="form-control">${esc(i.dept_remarks)}</textarea>
+      <div class="d-flex gap-2 align-items-center mt-2 flex-wrap"><button class="btn btn-sm btn-outline-secondary" id="ixPic">📷 Add picture</button><input type="file" accept="image/*" capture="environment" class="d-none" id="ixPicIn"><span class="small muted" id="ixPicN">${(i.dept_evidence_ids || []).length} picture(s)</span>
+      <button class="btn btn-sm btn-success ms-auto" id="ixDone">✔ Mark Done</button></div></div>`;
+  }
+  if (S.isAuditor && i.status === 'Done') {
+    actions = `<div class="iss-box"><h6>Cross-verify</h6><label class="form-label small fw-bold">Verification remarks</label><textarea id="ixVer" rows="2" class="form-control" placeholder="What did you check?"></textarea>
+      <div class="d-flex gap-2 mt-2"><button class="btn btn-sm btn-success" id="ixOk">✔ Verified — issue cleared</button><button class="btn btn-sm btn-outline-danger" id="ixNo">✖ Not cleared — send back</button></div></div>`;
+  }
+  const tools = `<div class="d-flex gap-2 mt-3 flex-wrap">${S.isAuditor ? '<button class="btn btn-sm btn-outline-info" id="ixMail">✉ E-mail ownership</button>' : ''}${S.isAdmin ? '<button class="btn btn-sm btn-outline-danger ms-auto" id="ixDel">🗑 Delete issue</button>' : ''}</div>`;
+  showModal(`${i.no} — ${i.department}`, `<div class="d-flex gap-2 align-items-center mb-2">${typeBadge(i.type)}<span class="badge bg-${ISSUE_ST_BADGE[i.status] || 'secondary'}">${esc(issueStatusLabel(i.status))}</span>${i.email_owner ? '<span class="badge bg-info text-dark">✉ ownership</span>' : ''}</div>
+    <div class="row g-2 mb-2">${row('Organization / Branch', esc(i.company) + (i.branch ? ' / ' + esc(i.branch) : ''))}${row('Department', esc(i.department))}${row('Raised by', `${esc(i.created_by)}<div class="small muted">${esc(i.created_at)}</div>`)}
+      ${row('Due date', i.due_date ? `${esc(i.due_date)}<div class="small muted">set by ${esc(i.due_set_by)}</div>` : '<span class="text-warning">Not set yet</span>')}
+      ${row('Pending days', `${a.days_open} day(s)${a.overdue_days ? ` <span class="badge bg-danger">${a.late ? 'late' : 'overdue'} ${a.overdue_days}d</span>` : ''}`)}
+      ${row('Cleared / Verified', `${esc(i.done_date || '—')} / ${esc(i.verified_date || '—')}${a.days_to_verify != null ? `<div class="small muted">${a.days_to_verify} day(s) in total</div>` : ''}`)}</div>
+    <div class="iss-box"><h6>Issue</h6><div class="pre">${esc(i.detail)}</div><h6 class="mt-2">Recommendation</h6><div class="pre">${esc(i.recommendation)}</div><h6 class="mt-2">Auditor's pictures</h6><div id="ixA">${loading}</div></div>
+    <div class="iss-box"><h6>Department response</h6>${i.dept_remarks ? `<div class="pre">${esc(i.dept_remarks)}</div><div class="small muted">${esc(i.done_by)} ${esc(i.done_at)}</div>` : '<span class="muted">No response yet.</span>'}<div id="ixD" class="mt-2"></div></div>
+    ${i.verify_remarks || i.verified_by ? `<div class="iss-box"><h6>Verification</h6><div class="pre">${esc(i.verify_remarks || '')}</div><div class="small muted">${esc(i.verified_by)} ${esc(i.verified_at)}</div></div>` : ''}
+    ${actions}${tools}
+    <details class="mt-3"><summary class="small fw-bold">History (${(i.history || []).length})</summary><ul class="small mt-2">${(i.history || []).map((h) => `<li><b>${esc(h.ts)}</b> — ${esc(h.by)} (${esc(h.role)}): ${esc(h.action)}${h.note ? ' — ' + esc(h.note) : ''}</li>`).join('')}</ul></details>`);
+  filesHtml(i.evidence_ids).then((h) => { if ($('ixA')) $('ixA').innerHTML = h; });
+  if ((i.dept_evidence_ids || []).length) filesHtml(i.dept_evidence_ids).then((h) => { if ($('ixD')) $('ixD').innerHTML = h; });
+  $('detailBody').onclick = (ev) => { if (ev.target.classList.contains('iss-thumb')) ev.target.classList.toggle('big'); };
+  // seen flags
+  if (S.isDept && !i.dept_seen) updateDoc(doc(db, 'issues', id), { dept_seen: true }).catch(() => {});
+  if (canManage(i) && i.auditor_alert) updateDoc(doc(db, 'issues', id), { auditor_alert: '' }).catch(() => {});
+  const upd = async (data, msg) => {
+    try { await updateDoc(doc(db, 'issues', id), { ...data, updated_at: nowText() }); toast(msg); bootstrap.Modal.getOrCreateInstance($('detailModal')).hide(); } catch (e) { fail(e); }
+  };
+  if ($('ixSaveDue')) $('ixSaveDue').onclick = () => {
+    const d = $('ixDue').value;
+    if (!d) return toast('Choose a date', 'warning');
+    if (d < t) return toast('Due date cannot be in the past', 'warning');
+    upd({ due_date: d, due_set_by: S.prof.username, due_set_at: nowText(), dept_seen: true, auditor_alert: `due date ${d}`,
+      history: arrayUnion(histEntry(i.due_date ? 'Due date changed' : 'Due date set', `${i.due_date ? i.due_date + ' → ' : ''}${d}`)) }, `Due date ${d} saved — the auditor is notified`);
+  };
+  if ($('ixPic')) {
+    $('ixPic').onclick = () => $('ixPicIn').click();
+    $('ixPicIn').onchange = async (ev) => {
+      const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+      const cur = (S.issues.find((x) => x.id === id) || i).dept_evidence_ids || [];
+      if (cur.length >= 5) return toast('Maximum 5 pictures.', 'warning');
+      try {
+        $('ixPicN').textContent = 'Uploading…';
+        const fid = await uploadIssueFile(f, i, 'department');
+        await updateDoc(doc(db, 'issues', id), { dept_evidence_ids: [...cur, fid], updated_at: nowText() });
+        $('ixPicN').textContent = `${cur.length + 1} picture(s)`;
+        filesHtml([...cur, fid]).then((h) => { if ($('ixD')) $('ixD').innerHTML = h; });
+      } catch (e) { $('ixPicN').textContent = ''; fail(e); }
+    };
+  }
+  if ($('ixDone')) $('ixDone').onclick = async () => {
+    const rem = $('ixRem').value.trim();
+    if (!rem) return toast('Write remarks: what was done to clear the issue.', 'warning');
+    if (!await askConfirm(`Mark ${i.no} as Done? The auditor will check it.`, 'Mark Done')) return;
+    upd({ status: 'Done', dept_remarks: rem.slice(0, 4000), done_by: S.prof.username, done_at: nowText(), done_date: t, dept_seen: true, auditor_alert: 'marked Done',
+      history: arrayUnion(histEntry('Marked Done by department', rem)) }, `${i.no} marked Done — sent to the auditor`);
+  };
+  if ($('ixOk')) $('ixOk').onclick = () => upd({ status: 'Verified', verify_remarks: $('ixVer').value.trim(), verified_by: S.prof.username, verified_at: nowText(), verified_date: t, auditor_alert: '',
+    history: arrayUnion(histEntry('Verified — issue cleared', $('ixVer').value.trim())) }, `${i.no} verified ✔ — moved to Verified`);
+  if ($('ixNo')) $('ixNo').onclick = () => {
+    const r = $('ixVer').value.trim();
+    if (!r) return toast('Write why it is not cleared.', 'warning');
+    upd({ status: 'Reopened', verify_remarks: r, done_date: '', dept_seen: false, auditor_alert: '',
+      history: arrayUnion(histEntry('Not cleared — sent back to department', r)) }, `${i.no} sent back to ${i.department}`);
+  };
+  if ($('ixMail')) $('ixMail').onclick = () => { mailIssue(i); updateDoc(doc(db, 'issues', id), { emailed: true, history: arrayUnion(histEntry('E-mail to ownership opened')) }).catch(() => {}); };
+  if ($('ixDel')) $('ixDel').onclick = async () => {
+    if (!await askConfirm(`Delete ${i.no} permanently? This cannot be undone.`, 'Delete')) return;
+    try {
+      await deleteDoc(doc(db, 'issues', id));
+      await Promise.all([...(i.evidence_ids || []), ...(i.dept_evidence_ids || [])].map((f) => deleteDoc(doc(db, 'issue_files', f)).catch(() => {})));
+      log('DELETE_ISSUE', i.no); toast(`${i.no} deleted`); bootstrap.Modal.getOrCreateInstance($('detailModal')).hide();
+    } catch (e) { fail(e); }
+  };
+}
+
+// ------------------------------------------------------------------ audit issue reports
+async function renderIssueReport(q) {
+  mount('ireport', loading);
+  S.onIssues = () => drawIssueReport(q);
+  if (S.issues) drawIssueReport(q);
+}
+function drawIssueReport(q) {
+  if (!$('main')) return;
+  const t = today();
+  const f = { start: q.start || t.slice(0, 8) + '01', end: q.end || t, company: q.company || '', department: S.isDept ? '' : (q.department || ''), type: q.type || '',
+    status: q.status || '', raised_by: q.raised_by || '', branch: q.branch || '', overdue: q.overdue || '', q: q.q || '', group_by: q.group_by || (S.isDept ? 'type' : 'department'), sub_group: q.sub_group || '' };
+  const o = issueFilterOpts();
+  const rp = L.issueReport(S.issues || [], f, t);
+  const gl = (k) => (L.ISSUE_GROUP_BY.find(([v]) => v === k) || [k, k])[1];
+  const T = rp.totals;
+  const col = (lbl, inner, w = 2) => `<div class="col-md-${w}"><label class="form-label small fw-bold">${lbl}</label>${inner}</div>`;
+  const sumRow = (g, sub) => `<tr class="${sub ? 'sub-row' : rp.sub_group ? 'grp-total' : ''}"><td>${sub ? '' : `<b>${esc(g.key)}</b>`}</td>${rp.sub_group ? `<td>${sub ? esc(g.sub) : '<span class="muted">All</span>'}</td>` : ''}
+    <td>${g.total}</td><td class="text-danger">${g.major}</td><td>${g.minor}</td><td class="text-warning">${g.pending}</td><td>${g.done}</td><td class="text-success">${g.verified}</td><td class="text-danger">${g.overdue || ''}</td><td>${g.no_due || ''}</td><td>${g.avg_days}</td><td>${pctBar(g.on_time_pct)}</td><td>${pctBar(g.close_pct)}</td></tr>`;
+  $('main').innerHTML = `<form id="irf" class="panel"><div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2"><h5 class="m-0">Audit Issue Reports</h5>
+      <div class="d-flex gap-1"><button type="button" class="btn btn-success btn-sm" id="irxS">⬇ Summary Excel</button><button type="button" class="btn btn-success btn-sm" id="irxL">⬇ Full list Excel</button></div></div>
+    <div class="row g-2">${col('Raised from', `<input type="date" name="start" value="${f.start}" class="form-control form-control-sm">`)}${col('Raised to', `<input type="date" name="end" value="${f.end}" class="form-control form-control-sm">`)}
+      ${col('Organization', `<select name="company" class="form-select form-select-sm">${opt(L.SHEET_LISTS.company, f.company, 'RC & RCG')}</select>`)}
+      ${S.isDept ? '' : col('Department', `<select name="department" class="form-select form-select-sm">${opt(o.departments, f.department, 'All departments')}</select>`)}
+      ${col('Issue type', `<select name="type" class="form-select form-select-sm">${opt(L.ISSUE_TYPES, f.type, 'Minor & Major')}</select>`)}
+      ${col('Status', `<select name="status" class="form-select form-select-sm"><option value="">All</option>${[['Pending', 'Pending (Open + Reopened)'], ['Open', 'Open'], ['Reopened', 'Reopened'], ['Done', 'Done — waiting check'], ['Verified', 'Verified']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
+      ${col('Raised by', `<select name="raised_by" class="form-select form-select-sm">${opt(o.raisers, f.raised_by, 'All auditors')}</select>`)}
+      ${col('Branch', `<select name="branch" class="form-select form-select-sm">${opt(o.branches, f.branch, 'All branches')}</select>`)}
+      ${col('Group by', `<select name="group_by" class="form-select form-select-sm">${L.ISSUE_GROUP_BY.map(([v, l]) => `<option value="${v}" ${f.group_by === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
+      ${col('Sub group', `<select name="sub_group" class="form-select form-select-sm"><option value="">— none —</option>${L.ISSUE_GROUP_BY.map(([v, l]) => `<option value="${v}" ${f.sub_group === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
+      ${col('Search', `<input name="q" value="${esc(f.q)}" class="form-control form-control-sm" placeholder="no / text">`)}
+      <div class="col-md-2 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" name="overdue" value="1" id="irO" ${f.overdue ? 'checked' : ''}><label class="form-check-label small fw-bold" for="irO">Overdue only</label></div></div></div>
+    <button class="btn btn-primary w-100 mt-2 btn-sm">Generate</button>
+    <div class="small muted mt-1"><b>Pending days</b> = raised date → date the department marked Done (or today). <b>On-time %</b> = cleared on or before the due date. <b>Closed %</b> = verified ÷ total.</div></form>
+    <div class="panel"><div class="mb-2"><span class="badge bg-secondary">Total: ${T.total}</span> <span class="badge bg-danger">Major: ${T.major}</span> <span class="badge bg-secondary">Minor: ${T.minor}</span> <span class="badge bg-warning text-dark">Pending: ${T.pending}</span> <span class="badge bg-info text-dark">Waiting check: ${T.done}</span> <span class="badge bg-success">Verified: ${T.verified}</span> <span class="badge bg-danger">Overdue: ${T.overdue}</span> <span class="badge bg-dark">Avg days to clear: ${T.avg_days}</span> <span class="badge bg-primary">On-time: ${T.on_time_pct}%</span></div>
+    <div class="table-wrap">${rp.rows.length ? `<table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr><th>${esc(gl(rp.group_by))}</th>${rp.sub_group ? `<th>${esc(gl(rp.sub_group))}</th>` : ''}<th>Total</th><th>Major</th><th>Minor</th><th>Pending</th><th>Waiting check</th><th>Verified</th><th>Overdue</th><th>No due date</th><th>Avg days to clear</th><th style="min-width:150px">On-time %</th><th style="min-width:150px">Closed %</th></tr></thead><tbody>
+      ${rp.rows.map((g) => sumRow(g, false) + (g.children || []).map((c) => sumRow(c, true)).join('')).join('')}</tbody></table>` : `<div class="text-center p-4 muted">${S.issues ? 'No issues in this range.' : 'Loading…'}</div>`}</div></div>
+    <div class="panel"><h6>Issue list (${rp.items.length})</h6><div class="table-wrap">${rp.items.length ? `<table class="table table-sm table-striped table-bordered tbl mb-0"><thead><tr><th>No</th><th>Raised</th><th>Organization</th><th>Department</th><th>Type</th><th>Issue</th><th>Raised by</th><th>Due</th><th>Cleared</th><th>Verified</th><th>Pending days</th><th>Overdue</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rp.items.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).map((i) => { const a = L.issueAge(i, t); return `<tr><td class="text-nowrap"><b>${esc(i.no)}</b></td><td class="text-nowrap">${esc(i.created_date)}</td><td>${esc(i.company)}</td><td>${esc(i.department)}</td><td>${typeBadge(i.type)}</td><td class="small">${esc(short(i.detail, 70))}</td><td>${esc(i.created_by)}</td><td class="text-nowrap">${esc(i.due_date || '—')}</td><td class="text-nowrap">${esc(i.done_date || '—')}</td><td class="text-nowrap">${esc(i.verified_date || '—')}</td><td>${a.days_open}</td><td>${a.overdue_days ? `<span class="text-danger">${a.overdue_days}d${a.late ? ' late' : ''}</span>` : ''}</td><td><span class="badge bg-${ISSUE_ST_BADGE[i.status] || 'secondary'}">${esc(issueStatusLabel(i.status))}</span></td><td><button class="btn btn-sm btn-outline-primary py-0 iss-open" data-id="${i.id}">Open</button></td></tr>`; }).join('')}
+      </tbody></table>` : '<div class="text-center p-3 muted">—</div>'}</div></div>`;
+  $('irf').onsubmit = (ev) => { ev.preventDefault(); go('ireport', readForm(ev.target)); };
+  $('main').onclick = (ev) => { const b = ev.target.closest('.iss-open'); if (b) openIssue(b.dataset.id); };
+  const xs = (g, sub) => [g.key, sub, g.total, g.major, g.minor, g.pending, g.done, g.verified, g.overdue, g.no_due, g.avg_days, g.on_time_pct, g.close_pct];
+  $('irxS').onclick = () => exportXlsx(`Issue_Summary_${f.start}_to_${f.end}`, [gl(rp.group_by), rp.sub_group ? gl(rp.sub_group) : 'Sub group', 'Total', 'Major', 'Minor', 'Pending', 'Waiting check', 'Verified', 'Overdue', 'No due date', 'Avg days to clear', 'On-time %', 'Closed %'],
+    [...rp.rows.flatMap((g) => [xs(g, rp.sub_group ? 'ALL' : ''), ...(g.children || []).map((c) => xs(c, c.sub))]), xs(T, 'TOTAL')]);
+  $('irxL').onclick = () => exportXlsx(`Issue_List_${f.start}_to_${f.end}`, ['No', 'Raised on', 'Raised at', 'Raised by', 'Organization', 'Branch', 'Department', 'Type', 'E-mail ownership', 'Issue', 'Recommendation', 'Auditor pictures', 'Due date', 'Due set by', 'Department remarks', 'Department pictures', 'Done by', 'Cleared on', 'Verified by', 'Verified on', 'Verification remarks', 'Pending days', 'Overdue days', 'Status'],
+    rp.items.map((i) => { const a = L.issueAge(i, t); return [i.no, i.created_date, i.created_at, i.created_by, i.company, i.branch, i.department, i.type, i.email_owner ? 'Yes' : 'No', i.detail, i.recommendation, (i.evidence_ids || []).length, i.due_date, i.due_set_by, i.dept_remarks, (i.dept_evidence_ids || []).length, i.done_by, i.done_date, i.verified_by, i.verified_date, i.verify_remarks, a.days_open, a.overdue_days, issueStatusLabel(i.status)]; }));
 }
 
 // ------------------------------------------------------------------ admin: tasks
@@ -701,7 +1053,7 @@ function renderAdminTasks(q) {
       <div class="small muted mt-1">One row = one check-list point. Rows with the same Check List, Task, Branch and User show as one line in the portal. Use <b>＋ Point</b> to add another point to the same check list.</div></div>
     ${S.isAdmin ? '' : '<div class="small muted mb-1 px-1">You can add your own tasks and change Recurrence, Target, SOP etc. Every change is saved in the 📜 Change log (old → new). Only the admin can hide or delete a task.</div>'}
     <div class="panel">${S.isAdmin ? '<div class="d-flex gap-2 mb-2"><button class="btn btn-sm btn-outline-warning" data-act="hide">Hide selected</button><button class="btn btn-sm btn-outline-success" data-act="unhide">Unhide selected</button><button class="btn btn-sm btn-outline-danger" data-act="delete">Delete selected</button></div>' : ''}
-    <div class="table-wrap"><table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr>${S.isAdmin ? '<th><input type="checkbox" id="selAll" class="form-check-input"></th>' : ''}<th>Today</th><th>Depart</th><th>Check List</th><th>Detail</th><th>Task</th><th>User</th><th>Recurrence</th><th>Target</th><th>Company</th><th>Branch</th><th>SOP</th><th>Status</th><th style="min-width:120px"></th></tr></thead><tbody>
+    <div class="table-wrap"><table class="table table-sm table-bordered table-hover tbl mb-0"><thead><tr>${S.isAdmin ? '<th><input type="checkbox" id="selAll" class="form-check-input"></th>' : ''}<th>Today</th><th>Depart</th><th>Check List</th><th>Detail</th><th>Task</th><th>User</th><th>Recurrence</th><th>Target</th><th>Organization</th><th>Branch</th><th>SOP</th><th>Status</th><th style="min-width:120px"></th></tr></thead><tbody>
     ${list.slice(0, 2000).map((x) => `<tr class="${x.hidden ? 'hidden-row' : ''}">${S.isAdmin ? `<td><input type="checkbox" class="form-check-input sel" value="${x.id}"></td>` : ''}<td>${L.isScheduled(x, t, opts()) && !x.hidden ? '<span class="badge bg-primary">Y</span>' : 'N'}</td>
       <td>${esc(x.depart)}</td><td>${esc(x.checklist)}</td><td class="small">${esc(x.detail)}</td><td>${esc(x.task)}</td><td>${esc(x.user)}</td><td>${esc(x.recurrence)}</td><td>${esc(x.target)}${x.target_month ? ' / M' + esc(x.target_month) : ''}</td><td>${esc(x.company)}</td><td>${esc(x.branch)}</td>
       <td>${x.sop_url ? `<a href="${esc(x.sop_url)}" target="_blank" rel="noopener">${esc(x.sop_name || 'Link')}</a>` : esc(x.sop_name)}</td>
@@ -768,7 +1120,7 @@ async function renderTaskForm(q) {
     </div>
     <div class="section-title">2. Who &amp; where</div><div class="row g-2">
       ${dd('user', '1st — User (assigned to)', 3, Ls.user, true)}
-      ${dd('company', 'Company', 3, Ls.company, true)}
+      ${dd('company', 'Organization', 3, Ls.company, true)}
       ${dd('branch', 'Branch Name', 3, Ls.branch, true)}
       ${dd('audit_type', 'Triggered / Daily Work', 3, Ls.audit_type)}
     </div>
@@ -925,7 +1277,7 @@ async function renderTaskLog(q) {
       <span class="muted small">${rows.length} change(s)</span></form></div>
     <div class="panel">${rows.length ? logTable(rows) : '<div class="text-center p-4 muted">No task changes yet.</div>'}</div>`);
   $('lf').onsubmit = (ev) => { ev.preventDefault(); go('admin/log', readForm(ev.target)); };
-  $('lx').onclick = () => exportXlsx('Task_Change_Log', ['When', 'Changed by', 'Role', 'Action', 'User (1st)', 'Department', 'Check List', 'Task', 'Company', 'Branch', 'Field', 'Old', 'New'],
+  $('lx').onclick = () => exportXlsx('Task_Change_Log', ['When', 'Changed by', 'Role', 'Action', 'User (1st)', 'Department', 'Check List', 'Task', 'Organization', 'Branch', 'Field', 'Old', 'New'],
     rows.flatMap((r) => ((r.changes || []).length ? r.changes : [{ label: '', from: '', to: '' }]).map((c) => [r.ts, r.by, r.by_role, r.action, r.user, r.depart, r.checklist, r.task, r.company, r.branch, c.label, c.from, c.to])));
 }
 
@@ -946,6 +1298,7 @@ async function createLogin(username, password, extra = {}) {
       username: old.username || username.trim(), username_lc: lc, email, role: old.role || extra.role || 'Officer',
       salary: old.salary ?? (Number(extra.salary) || 0), active: true, created_at: nowText(), last_login: '',
       closed_until: old.closed_until || extra.closed_until || L.addDays(today(), -1), must_change: extra.must_change ?? true,
+      department: old.department || extra.department || '', dept_lc: L.norm(old.department || extra.department || ''), company: old.company ?? extra.company ?? '',
     });
     await setDoc(doc(db, 'usernames', lc), { email, uid, n });
     if (prev) await updateDoc(doc(db, 'users', prev), { active: false, replaced_by: uid });
@@ -994,12 +1347,14 @@ async function renderUsers() {
   const live = S.users.filter((u) => !u.replaced_by);
   mount('users', `<div class="row g-2"><div class="col-lg-8"><div class="panel"><h6>Users</h6>
     ${missing.length ? `<div class="alert alert-warning py-2 small">Tasks are assigned to names that have no login: <b>${esc(missing.join(', '))}</b>. Add them on the right.</div>` : ''}
-    <div class="table-wrap"><table class="table table-sm table-bordered tbl mb-0"><thead><tr><th>Username</th><th>Role</th><th>Monthly Salary</th><th>Active</th><th>Active tasks</th><th>Last login</th><th></th></tr></thead><tbody>
-    ${live.map((u, i) => `<tr class="${u.active ? '' : 'hidden-row'}"><td><b>${esc(u.username)}</b></td><td>${esc(u.role)}</td><td>${money(u.salary)}</td><td>${u.active ? 'Y' : 'N'}</td><td>${cnt(u.username_lc)}</td><td class="small">${esc(u.last_login || '')}</td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Edit</button></td></tr>`).join('')}
+    <div class="table-wrap"><table class="table table-sm table-bordered tbl mb-0"><thead><tr><th>Username</th><th>Role</th><th>Department login</th><th>Monthly Salary</th><th>Active</th><th>Active tasks</th><th>Last login</th><th></th></tr></thead><tbody>
+    ${live.map((u, i) => `<tr class="${u.active ? '' : 'hidden-row'}"><td><b>${esc(u.username)}</b></td><td>${esc(u.role)}</td><td>${u.role === 'Department' ? esc(u.department) + ' · ' + esc(u.company || 'RC & RCG') : ''}</td><td>${money(u.salary)}</td><td>${u.active ? 'Y' : 'N'}</td><td>${cnt(u.username_lc)}</td><td class="small">${esc(u.last_login || '')}</td><td><button class="btn btn-sm btn-outline-primary py-0" data-i="${i}">Edit</button></td></tr>`).join('')}
     </tbody></table></div></div></div>
     <div class="col-lg-4"><form class="panel" id="uf"><h6 id="ufT">Add User</h6>
       <label class="form-label small fw-bold">Username (same name used in tasks — can be renamed)</label><input name="username" class="form-control form-control-sm mb-2" required>
-      <label class="form-label small fw-bold">Role</label><select name="role" class="form-select form-select-sm mb-2"><option>Officer</option><option>Admin</option></select>
+      <label class="form-label small fw-bold">Role</label><select name="role" id="ufRole" class="form-select form-select-sm mb-2"><option value="Officer">Officer (auditor)</option><option value="Admin">Admin</option><option value="Department">Department (sees only its audit issues)</option></select>
+      <div id="ufDept" class="d-none"><label class="form-label small fw-bold">Department</label><select name="department" class="form-select form-select-sm mb-2">${opt(L.listings(S.tasks).depart, '', '— select —')}</select>
+        <label class="form-label small fw-bold">Organization</label><select name="company" class="form-select form-select-sm mb-2">${opt(L.SHEET_LISTS.company, '', 'RC & RCG (both)')}</select></div>
       <label class="form-label small fw-bold">Monthly Salary (for % fine)</label><input name="salary" type="number" min="0" class="form-control form-control-sm mb-2">
       <label class="form-label small fw-bold">Password <span class="muted" id="pwHint">(min 6 — user changes it at first login)</span></label><input name="password" class="form-control form-control-sm mb-2" minlength="6">
       <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="active" id="ufA" checked><label for="ufA" class="form-check-label">Active</label></div>
@@ -1007,10 +1362,13 @@ async function renderUsers() {
       <div id="uerr" class="text-danger small mt-2"></div></form></div></div>`);
   let editing = null;   // eslint-disable-line prefer-const
   const f = $('uf');
+  const deptBox = () => $('ufDept').classList.toggle('d-none', f.role.value !== 'Department');
+  f.role.onchange = deptBox;
   $('main').onclick = (ev) => {
     const b = ev.target.closest('[data-i]'); if (!b) return;
     editing = live[+b.dataset.i];
     f.username.value = editing.username; f.username.readOnly = false; f.role.value = editing.role; f.salary.value = editing.salary || 0; f.active.checked = !!editing.active; f.password.value = '';
+    f.department.value = editing.department || ''; f.company.value = editing.company || ''; deptBox();
     $('ufT').textContent = 'Edit ' + editing.username; $('pwHint').textContent = '(blank = keep; filled = reset password)';
   };
   $('ufNew').onclick = () => renderUsers();
@@ -1028,7 +1386,9 @@ async function renderUsers() {
           toast(`Renamed to ${newName}: ${n.tasks} task(s), ${n.records} history record(s) updated`);
           editing = { ...editing, username: newName, username_lc: L.norm(newName) };
         }
-        await updateDoc(doc(db, 'users', editing.uid), { role: v.role, salary: Number(v.salary) || 0, active: !!v.active });
+        if (v.role === 'Department' && !v.department) throw new Error('Choose the department for this login.');
+        await updateDoc(doc(db, 'users', editing.uid), { role: v.role, salary: Number(v.salary) || 0, active: !!v.active,
+          department: v.role === 'Department' ? v.department : '', dept_lc: v.role === 'Department' ? L.norm(v.department) : '', company: v.role === 'Department' ? (v.company || '') : '' });
         if (v.password) {
           const self = editing.uid === S.uid;
           if (self && !(await askConfirm(`Set a new password for your own login "${editing.username}"? You will be logged out and must log in again with the new password.`, 'Set password'))) return;
@@ -1040,7 +1400,9 @@ async function renderUsers() {
       } else {
         if (!v.password || v.password.length < 6) throw new Error('Password (min 6) is required for a new user.');
         if (known.has(L.norm(v.username))) throw new Error('This username already exists — click Edit instead.');
-        await createLogin(v.username, v.password, { role: v.role, salary: v.salary, must_change: true });
+        if (v.role === 'Department' && !v.department) throw new Error('Choose the department for this login.');
+        await createLogin(v.username, v.password, { role: v.role, salary: v.salary, must_change: true,
+          ...(v.role === 'Department' ? { department: v.department, company: v.company || '' } : {}) });
         log('ADD_USER', v.username);
         toast('User created');
       }
@@ -1059,7 +1421,9 @@ function renderSettings() {
       <b>1) Per-task fine</b> (FINE_MODE PER_TASK or BOTH) = number of FALSE × <code>FINE_PER_TASK</code> (or the department's rate from <code>DEPT_FINES</code>).<br>
       <b>2) Salary % fine</b> (FINE_MODE PERCENT or BOTH) = monthly salary × the % from <code>FINE_PCT_SLABS</code> for the month's efficiency. Set each user's salary in <b>Users</b>; salary 0 = no % fine.<br>
       <b>Total fine</b> = 1 + 2. It is final at month end; the month-end snapshot is saved on the 1st.<br>
-      <b>3) Department fine</b> (separate from the auditor): the auditor first ticks <b>TRUE</b> (he checked it), then chooses the department's work: <b>Complete</b> or <b>Incomplete</b> (+ remarks and 📷 pictures as evidence). Every <b>Incomplete</b> = <code>DEPT_INCOMPLETE_FINE</code> Rs (or the department's own rate in <code>DEPT_INCOMPLETE_FINES</code>) charged to that <b>company · department</b>. See Monthly Performance → "Department fines" and the Efficiency report (Dept Fine column).<br>
+      <b>Trigger tasks</b> (Recurrence = Trigger, no day / date / month) show at the <b>end of Todays Task</b> under ⚡ Triggered. Tick them only when they happen; they are <b>not counted</b> in the auditor's efficiency and never become FALSE. A task that has a day, date or month (Weekly, Monthly …) is counted normally.<br>
+      <b>Audit Issues</b>: an auditor raises an issue for a department (Minor / Major, detail, recommendation, pictures). The department login sees it, sets a <b>due date</b>, clears it, writes remarks + pictures and marks <b>Done</b>. The auditor cross-checks and marks <b>Verified</b> (or sends it back). <b>Pending days</b> = raised → Done. Department logins are made in <b>Users</b> with Role = Department. Ownership e-mail: <code>OWNER_EMAILS</code>.<br>
+      <b>3) Department fine</b> (separate from the auditor): the auditor first ticks <b>TRUE</b> (he checked it), then chooses the department's work: <b>Complete</b> or <b>Incomplete</b> (+ remarks and 📷 pictures as evidence). Every <b>Incomplete</b> = <code>DEPT_INCOMPLETE_FINE</code> Rs (or the department's own rate in <code>DEPT_INCOMPLETE_FINES</code>) charged to that <b>company · department</b>. See Performance → "Department fines" and the Efficiency report (Dept Fine column).<br>
       <span class="muted"><b>Example:</b> 300 tasks due in the month, 270 TRUE, 30 FALSE → efficiency 90% → grade A. Per-task: 30 × Rs 100 = Rs 3,000 (if 10 of the 30 were Accounts with <code>Accounts:200</code> → 20×100 + 10×200 = Rs 4,000). Salary %: 90% falls in 85:2 → 2% of Rs 50,000 = Rs 1,000. Total (BOTH) = Rs 4,000 or Rs 5,000.</span>
     </div></div>
     <form class="panel" id="sf"><h6>Fines, grades &amp; rules</h6>
@@ -1234,9 +1598,13 @@ async function route() {
   if (!S.prof) return;
   if (S.prof.must_change) return renderPassword(true);
   const { path, q } = parseHash();
-  const adminOnly = ['users', 'settings'];
+  const adminOnly = ['admin/tasks', 'admin/task', 'admin/log', 'users', 'settings'];
   try {
+    if (S.isDept && !['issues', 'issues/new', 'ireport', 'password'].includes(path)) return go('issues');
     if (adminOnly.includes(path) && !S.isAdmin) return go('tasks');
+    if (path === 'issues') return await renderIssues(q);
+    if (path === 'issues/new') return await renderIssueForm(q);
+    if (path === 'ireport') return await renderIssueReport(q);
     if (path === 'report') return await renderReport(q);
     if (path === 'eff') return await renderEff(q);
     if (path === 'monthly') return await renderMonthly(q);
@@ -1260,6 +1628,7 @@ async function checkNewDay() {
   if (!S.prof || !S.day || S.rolling) return;
   const t = today();
   if (t === S.day) return;
+  if (S.isDept) { S.day = t; route(); return; }     // department logins have no daily tasks
   S.rolling = true;
   try {
     S.day = t;
@@ -1279,11 +1648,14 @@ async function boot(user) {
     const p = await getDoc(doc(db, 'users', user.uid));
     if (!p.exists() || !p.data().active) { await signOut(auth); return renderLogin('This login is not active. Ask the admin.'); }
     S.uid = user.uid; S.prof = p.data(); S.isAdmin = S.prof.role === 'Admin';
+    S.isDept = S.prof.role === 'Department'; S.isAuditor = !S.isDept;
     $('app').innerHTML = loading;
-    await Promise.all([loadSettings(), loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
+    await Promise.all([loadSettings(), S.isDept ? Promise.resolve() : loadTasks(), S.isAdmin ? loadUsers() : Promise.resolve()]);
     if (!S.isAdmin) S.users = [{ uid: S.uid, ...S.prof }];
     updateDoc(doc(db, 'users', S.uid), { last_login: nowText() }).catch(() => {});
     document.title = S.settings.APP_TITLE;
+    startIssueWatch();
+    if (S.isDept) { S.day = today(); route(); return; }
     try {
       const c = await closeDay();
       if (c.saved || c.falses) toast(`Previous day saved to the database: ${c.saved} tick(s)${c.falses ? `, ${c.falses} unmarked task(s) as FALSE` : ''}`, 'info');
@@ -1295,6 +1667,7 @@ async function boot(user) {
 
 onAuthStateChanged(auth, (user) => {
   if (S.settingUp) return;          // first-admin setup is still writing the profile
-  S.prof = null; S.uid = null; S.isAdmin = false; clearCache();
+  stopIssueWatch();
+  S.prof = null; S.uid = null; S.isAdmin = false; S.isDept = false; S.isAuditor = false; clearCache();
   if (user) boot(user); else renderLogin();
 });

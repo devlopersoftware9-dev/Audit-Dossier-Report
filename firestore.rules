@@ -9,6 +9,8 @@ service cloud.firestore {
     function admin() { return active() && prof().role == 'Admin'; }
     function setupDone() { return exists(/databases/$(database)/documents/meta/setup); }
     function myLc() { return prof().username_lc; }
+    function auditor() { return active() && prof().role in ['Admin', 'Officer']; }
+    function deptUser() { return active() && prof().role == 'Department'; }
 
     // first-run flag (public so the login page knows whether to show "First-time setup")
     match /meta/{id} {
@@ -34,23 +36,9 @@ service cloud.firestore {
       allow delete: if admin();
     }
 
-    // tasks: admin does everything; an officer may add / change only his own tasks and can never hide, unhide or delete
-    match /tasks/{id} {
-      allow read: if active();
-      allow create: if admin()
-        || (active() && request.resource.data.user_lc == myLc() && request.resource.data.get('hidden', false) == false);
-      allow update: if admin()
-        || (active() && resource.data.user_lc == myLc() && request.resource.data.user_lc == myLc()
-            && request.resource.data.get('hidden', false) == resource.data.get('hidden', false));
-      allow delete: if admin();
-    }
-    // task change log (old -> new); nobody can edit it, only the admin can delete
-    match /task_log/{id} {
-      allow read: if admin() || (active() && resource.data.user_lc == myLc());
-      allow create: if admin() || (active() && request.resource.data.by_lc == myLc() && request.resource.data.user_lc == myLc());
-      allow update: if false;
-      allow delete: if admin();
-    }
+    match /tasks/{id}    { allow read: if active(); allow write: if admin(); }
+    // task change log (old -> new) — admin only
+    match /task_log/{id} { allow read, create, delete: if admin(); allow update: if false; }
     match /settings/{id} { allow read: if active(); allow write: if admin(); }
     match /monthly/{id}  { allow read: if active(); allow write: if admin(); }
     match /logs/{id}     { allow create: if active(); allow read: if admin(); }
@@ -59,7 +47,7 @@ service cloud.firestore {
     match /marks/{id} {
       allow read: if admin() || (active() && resource.data.user_lc == myLc());
       allow create, update: if admin()
-        || (active() && request.resource.data.user_lc == myLc() && request.resource.data.source in ['Portal', 'Extra']);
+        || (active() && request.resource.data.user_lc == myLc() && request.resource.data.source in ['Portal', 'Extra', 'Trigger']);
       allow delete: if admin() || (active() && resource.data.user_lc == myLc());
     }
 
@@ -72,16 +60,42 @@ service cloud.firestore {
       allow delete: if admin();
     }
 
+    // audit issues: auditors raise and verify; a department login sees and answers only its own department
+    match /issues/{id} {
+      allow read: if auditor() || (deptUser() && resource.data.dept_lc == prof().dept_lc);
+      allow create: if auditor() && request.resource.data.created_by_lc == myLc() && request.resource.data.status == 'Open';
+      allow update: if auditor()
+        || (deptUser() && resource.data.dept_lc == prof().dept_lc && resource.data.status != 'Verified'
+            && request.resource.data.dept_lc == resource.data.dept_lc
+            && request.resource.data.status in ['Open', 'Reopened', 'Done']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['due_date', 'due_set_by', 'due_set_at', 'status', 'dept_remarks',
+                 'dept_evidence_ids', 'done_by', 'done_at', 'done_date', 'dept_seen', 'auditor_alert', 'history', 'updated_at']));
+      allow delete: if admin();
+    }
+    match /issue_files/{id} {
+      allow read: if auditor() || (deptUser() && resource.data.dept_lc == prof().dept_lc);
+      allow create: if (auditor() || (deptUser() && request.resource.data.dept_lc == prof().dept_lc))
+        && request.resource.data.data is string && request.resource.data.data.size() < 900000;
+      allow update: if false;
+      allow delete: if admin();
+    }
+    // running number for AUD-0001, AUD-0002 …
+    match /counters/{id} {
+      allow read: if active();
+      allow create: if auditor() && request.resource.data.n == 1;
+      allow update: if auditor() && request.resource.data.n == resource.data.n + 1;
+    }
+
     // date-wise TRUE / FALSE — officers only see and write their own
     match /records/{id} {
       allow read: if admin() || (active() && resource.data.user_lc == myLc());
       allow create: if admin()
         || (active() && request.resource.data.user_lc == myLc()
-            && request.resource.data.source in ['Portal', 'Extra', 'Auto-Closed']);
+            && request.resource.data.source in ['Portal', 'Extra', 'Trigger', 'Auto-Closed']);
       allow update: if admin()
         || (active() && resource.data.user_lc == myLc() && request.resource.data.user_lc == myLc()
             && resource.data.source != 'Auto-Closed' && resource.data.source != 'Admin'
-            && request.resource.data.source in ['Portal', 'Extra']
+            && request.resource.data.source in ['Portal', 'Extra', 'Trigger']
             && request.resource.data.date == resource.data.date);
       allow delete: if admin();
     }

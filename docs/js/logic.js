@@ -2,7 +2,15 @@
 // Works in the browser and in Node (for tests).
 
 export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-export const BUCKET_ORDER = { 'Daily': 1, 'Weekly': 2, 'Fortnightly': 3, 'Monthly': 4, 'Quarterly / Yearly': 5 };
+export const BUCKET_ORDER = { 'Daily': 1, 'Weekly': 2, 'Fortnightly': 3, 'Monthly': 4, 'Quarterly / Yearly': 5, 'Triggered': 8 };
+export const TRIGGER_BUCKET = 'Triggered';
+/** "Pure" trigger task: no day, date or month chosen — done only when something triggers it. Not counted in efficiency. */
+export function isPureTrigger(t) {
+  const tg = norm(t.target), r = norm(t.recurrence);
+  return tg === 'triggered' || tg === 'trigger' || ((r === 'trigger' || r === 'triggered') && !tg);
+}
+/** Records that are NOT counted in the auditor's efficiency (ticked on a day not due, or pure trigger tasks). */
+export const notCounted = (r) => ['extra', 'trigger'].includes(norm(r.source)) || !!r.trigger;
 
 export const DEFAULT_SETTINGS = [
   ['APP_TITLE', 'Audit Dossier Portal', 'Name shown at the top of the portal.'],
@@ -12,6 +20,7 @@ export const DEFAULT_SETTINGS = [
   ['FINE_PCT_SLABS', '95:0,85:2,75:5,60:10,0:15', 'Salary cut by monthly efficiency, highest first. 95:0 = 95% or more → 0% · 85:2 = 85–94.9% → 2% · 75:5 → 5% · 60:10 → 10% · 0:15 = below 60% → 15% of the user\'s monthly salary (set salary in Users).'],
   ['DEPT_INCOMPLETE_FINE', '0', 'Rs charged to the DEPARTMENT for every task the auditor ticked TRUE and marked "Incomplete". 0 = no department fine.'],
   ['DEPT_INCOMPLETE_FINES', '', 'Optional: a different department-fine rate per department, e.g. Accounts:500,Warehouse:300. Blank = DEPT_INCOMPLETE_FINE for all.'],
+  ['OWNER_EMAILS', '', 'Audit Issues: e-mail address(es) of the ownership, comma separated. When the auditor chooses "E-mail to ownership = Yes", an e-mail with the issue opens addressed to them.'],
   ['GRADE_SLABS', '95:A+,85:A,75:B,60:C,0:D', 'Grade by efficiency: 95% or more = A+, 85% = A, 75% = B, 60% = C, below 60% = D.'],
   ['WEEKLY_OFF', 'Fri', 'Weekly off day — no tasks are due (same as the sheet formula).'],
   ['WORK_ON_OFF_DAY_COMPANIES', 'RCG', 'Companies that still work on the off day (comma separated). RCG tasks are due on Friday too.'],
@@ -181,10 +190,15 @@ export function attach(g, recIndex, d) {
 }
 export const indexRecords = (recs) => new Map(recs.map((r) => [recordKey(r.date, r.user, r.branch, r.department, r.checklist, r.task_type), r]));
 
-export function todayTasks(groups, recs, d, opts, user = null) {
+/** Tasks due today; with withTriggers the pure trigger tasks are added at the end (bucket "Triggered"). */
+export function todayTasks(groups, recs, d, opts, user = null, withTriggers = false) {
   const idx = indexRecords(recs.filter((r) => r.date === d));
-  return sortGroups(groups.filter((g) => isScheduled(g, d, opts) && (user == null || norm(g.user) === norm(user)))
-    .map((g) => attach(g, idx, d)));
+  const mine = (g) => user == null || norm(g.user) === norm(user);
+  const due = sortGroups(groups.filter((g) => mine(g) && isScheduled(g, d, opts)).map((g) => attach(g, idx, d)));
+  if (!withTriggers) return due;
+  const trig = groups.filter((g) => mine(g) && isPureTrigger(g) && !isScheduled(g, d, opts))
+    .map((g) => ({ ...attach(g, idx, d), bucket: TRIGGER_BUCKET, trigger: true }));
+  return [...due, ...trig];
 }
 
 export function categoryTasks(groups, recs, d, opts, kind, value, user = null) {
@@ -214,7 +228,8 @@ export function makeRecord(g, d, user, status, remarks, source, ts, deptStatus =
   return { date: d, user, user_lc: norm(user), company: g.company, branch: g.branch, department: g.depart,
     checklist: g.checklist, todo: g.details.join(', '), task_type: g.task, status: status ? 1 : 0,
     remarks: (remarks || '').slice(0, 1000), source, timestamp: ts,
-    dept_status: status && DEPT_STATUSES.includes(deptStatus) ? deptStatus : '', evidence_ids: (evidenceIds || []).slice(0, 5) };
+    dept_status: status && DEPT_STATUSES.includes(deptStatus) ? deptStatus : '', evidence_ids: (evidenceIds || []).slice(0, 5),
+    ...(isPureTrigger(g) ? { trigger: true } : {}) };
 }
 export const isDeptIncomplete = (r) => !!r.status && r.dept_status === 'Incomplete';
 
@@ -242,7 +257,7 @@ export function filterRecords(recs, f, userLock = null) {
     if (user && norm(r.user) !== user) return false;
     if (st === 'TRUE' && !r.status) return false;
     if (st === 'FALSE' && r.status) return false;
-    for (const [k, col] of [['department', 'department'], ['branch', 'branch'], ['task_type', 'task_type'], ['source', 'source']]) {
+    for (const [k, col] of [['department', 'department'], ['branch', 'branch'], ['task_type', 'task_type'], ['source', 'source'], ['company', 'company']]) {
       if (f[k] && norm(r[col]) !== norm(f[k])) return false;
     }
     if (f.checklist && !norm(r.checklist).includes(norm(f.checklist))) return false;
@@ -270,45 +285,67 @@ export function fineCtx(s) {
 
 const round1 = (x) => Math.round(x * 10) / 10;
 const KEY_OF = {
-  user: (r) => r.user, department: (r) => r.department, checklist: (r) => `${r.department} › ${r.checklist}`,
-  branch: (r) => r.branch, task_type: (r) => r.task_type, date: (r) => r.date,
+  user: (r) => r.user, company: (r) => r.company, department: (r) => r.department, checklist: (r) => `${r.department} › ${r.checklist}`,
+  branch: (r) => r.branch, task_type: (r) => r.task_type, date: (r) => r.date, month: (r) => String(r.date || '').slice(0, 7),
 };
+export const GROUP_BY = [['user', 'User'], ['company', 'Organization'], ['department', 'Department'], ['branch', 'Branch'],
+  ['task_type', 'Task Type'], ['checklist', 'Check List'], ['date', 'Date'], ['month', 'Month']];
 
 /** salaries: Map(username_lc -> salary) */
+/** f.group_by and optional f.sub_group (second column). salaries: Map(username_lc -> salary) */
 export function efficiency(recs, f, s, salaries = new Map(), userLock = null) {
   const by = KEY_OF[f.group_by] ? f.group_by : 'user';
-  const rows0 = filterRecords(recs, { ...f, status: 'ALL' }, userLock).filter((r) => norm(r.source) !== 'extra');
+  const sub = KEY_OF[f.sub_group] && f.sub_group !== by ? f.sub_group : '';
+  const rows0 = filterRecords(recs, { ...f, status: 'ALL' }, userLock).filter((r) => !notCounted(r));
   const fc = fineCtx(s);
-  const agg = new Map();
-  for (const r of rows0) {
-    const k = KEY_OF[by](r) || '(blank)';
-    let g = agg.get(k);
-    if (!g) { g = { key: k, total: 0, done: 0, missed: 0, task_fine: 0, incomplete: 0, dept_fine: 0 }; agg.set(k, g); }
+  const blank = (key, subKey = '') => ({ key, sub: subKey, total: 0, done: 0, missed: 0, task_fine: 0, incomplete: 0, dept_fine: 0 });
+  const add = (g, r) => {
     g.total++;
     if (isDeptIncomplete(r)) { g.incomplete++; g.dept_fine += (fc.deptInc[norm(r.department)] ?? fc.deptIncRate); }
     if (r.status) g.done++;
     else { g.missed++; if (fc.perTaskOn) g.task_fine += (fc.dept[norm(r.department)] ?? fc.per); }
+  };
+  const agg = new Map(), subs = new Map();
+  for (const r of rows0) {
+    const k = KEY_OF[by](r) || '(blank)';
+    if (!agg.has(k)) agg.set(k, blank(k));
+    add(agg.get(k), r);
+    if (sub) {
+      const sk = KEY_OF[sub](r) || '(blank)';
+      const id = k + '\u0000' + sk;
+      if (!subs.has(id)) subs.set(id, blank(k, sk));
+      add(subs.get(id), r);
+    }
   }
-  const rows = [...agg.values()].map((g) => {
+  const finish = (g, isUser) => {
     g.pct = g.total ? round1(g.done * 100 / g.total) : 0;
     g.grade = slabFor(fc.grades, g.pct);
-    g.salary = by === 'user' ? (salaries.get(norm(g.key)) || 0) : 0;
-    g.deduct_pct = (fc.pctOn && by === 'user') ? (Number(slabFor(fc.slabs, g.pct)) || 0) : 0;
+    g.salary = isUser ? (salaries.get(norm(g.key)) || 0) : 0;
+    g.deduct_pct = (fc.pctOn && isUser) ? (Number(slabFor(fc.slabs, g.pct)) || 0) : 0;
     g.pct_fine = Math.round(g.salary * g.deduct_pct / 100);
     g.total_fine = Math.round(g.task_fine + g.pct_fine);
     return g;
-  });
-  rows.sort(by === 'date' ? ((a, b) => (a.key < b.key ? -1 : 1)) : ((a, b) => (a.pct - b.pct) || (b.missed - a.missed)));
+  };
+  const timeLike = (k) => k === 'date' || k === 'month';
+  const sorter = (k, f2) => (timeLike(k) ? ((a, b) => (a[f2] < b[f2] ? -1 : 1)) : ((a, b) => (a.pct - b.pct) || (b.missed - a.missed)));
+  const rows = [...agg.values()].map((g) => finish(g, by === 'user'));
+  rows.sort(sorter(by, 'key'));
+  if (sub) {
+    const all = [...subs.values()].map((g) => { finish(g, false); g.total_fine = Math.round(g.task_fine); return g; });
+    rows.forEach((g) => { g.children = all.filter((c) => c.key === g.key).sort(sorter(sub, 'sub')); });
+  }
   const tot = { total: 0, done: 0, missed: 0, total_fine: 0, incomplete: 0, dept_fine: 0 };
   rows.forEach((g) => { tot.total += g.total; tot.done += g.done; tot.missed += g.missed; tot.total_fine += g.total_fine; tot.incomplete += g.incomplete; tot.dept_fine += g.dept_fine; });
   tot.pct = tot.total ? round1(tot.done * 100 / tot.total) : 0;
-  return { rows, totals: tot, group_by: by, mode: fc.mode, show_pct: fc.pctOn && by === 'user' };
+  return { rows, totals: tot, group_by: by, sub_group: sub, mode: fc.mode, show_pct: fc.pctOn && by === 'user' };
 }
 
+/** Performance for a month ("2026-11") or a date range ({start, end}). */
 export function monthly(recs, ym, s, salaries = new Map(), user = null) {
-  const { start, end } = monthBounds(ym);
+  const { start, end } = typeof ym === 'string' ? monthBounds(ym) : ym;
   const eff = efficiency(recs, { start, end, user: user || '', group_by: 'user' }, s, salaries);
-  const inMonth = recs.filter((r) => r.date >= start && r.date <= end && norm(r.source) !== 'extra');
+  const inRange = recs.filter((r) => r.date >= start && r.date <= end && (!user || norm(r.user) === norm(user)));
+  const inMonth = inRange.filter((r) => !notCounted(r));
   const rows = [...eff.rows].sort((a, b) => b.pct - a.pct).map((u) => {
     const mine = inMonth.filter((r) => norm(r.user) === norm(u.key));
     const dm = new Map();
@@ -323,7 +360,7 @@ export function monthly(recs, ym, s, salaries = new Map(), user = null) {
       .map((r) => ({ date: r.date, department: r.department, checklist: r.checklist, task_type: r.task_type, remarks: r.remarks }));
     return { ...u, departments, missed_list };
   });
-  return { month: ym, rows, mode: eff.mode, dept_fines: deptFines(inMonth, s) };
+  return { month: typeof ym === 'string' ? ym : `${start} → ${end}`, start, end, rows, mode: eff.mode, dept_fines: deptFines(inRange, s) };
 }
 
 /** Department fines: tasks the auditor checked (TRUE) but marked the department "Incomplete". */
@@ -331,7 +368,7 @@ export function deptFines(recs, s) {
   const fc = fineCtx(s);
   const m = new Map();
   for (const r of recs) {
-    if (norm(r.source) === 'extra') continue;
+    if (norm(r.source) === 'extra') continue;   // trigger tasks DO count for the department fine
     const k = `${r.company} · ${r.department}`;
     let d = m.get(k);
     if (!d) { d = { key: k, company: r.company, department: r.department, checked: 0, complete: 0, incomplete: 0, fine: 0, items: [] }; m.set(k, d); }
@@ -485,7 +522,7 @@ export const SHEET_LISTS = {
   depart: ['Accounts', 'Admin', 'HR', 'Inventory', 'IT', 'Online & Marketing', 'QA', 'Retail', 'Retail + WH', 'Warehouse'],
   audit_type: ['Pre-Audit', 'Post-Audit'],
   recurrence: ['Daily', 'Weekly', 'Fornightly', 'Monthly', 'Quarterly', 'Twice a Year', 'Yearly', 'Trigger'],
-  company: ['RC', 'RCG', 'Rc Gojra', 'RCG Fsd'],
+  company: ['RC', 'RCG'],
   days: ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
   dates: Array.from({ length: 31 }, (_, i) => String(i + 1)),
   months: Array.from({ length: 12 }, (_, i) => String(i + 1)),
@@ -515,7 +552,7 @@ export function listings(tasks, userNames = []) {
     checklist: uniqSorted(col('checklist')),
     task: uniqSorted(col('task')),
     audit_type: uniqSorted([...SHEET_LISTS.audit_type, ...col('audit_type')]),
-    company: uniqSorted([...SHEET_LISTS.company, ...col('company')]),
+    company: [...SHEET_LISTS.company],
     branch: uniqSorted(['RC', ...col('branch')]),
     user: uniqSorted([...col('user'), ...userNames]),
     recurrence: [...new Set([...SHEET_LISTS.recurrence, ...col('recurrence')])],
@@ -546,7 +583,7 @@ export function nextDueDates(t, fromKey, opts, count = 5, days = 400) {
 export const TASK_LABELS = {
   depart: 'Department', checklist: 'Check List', checklist_url: 'Check list link', detail: 'Detail', task: 'Task', user: 'User (1st)',
   audit_type: 'Triggered / Daily', recurrence: 'Recurrence', target: 'Target Day / Date', target_month: 'Target Month',
-  start_time: 'Start Time', end_time: 'End Time', company: 'Company', branch: 'Branch', sop_name: 'SOP name', sop_url: 'SOP link',
+  start_time: 'Start Time', end_time: 'End Time', company: 'Organization', branch: 'Branch', sop_name: 'SOP name', sop_url: 'SOP link',
   ordered_by: 'Ordered By', remarks: 'Remarks', hidden: 'Hidden',
 };
 /** Field-by-field difference between a task before and after a change: [{field, label, from, to}]. */
@@ -555,4 +592,78 @@ export function taskDiff(before = {}, after = {}) {
   const show = (k, v) => (k === 'hidden' ? (v ? 'Yes' : 'No') : String(v ?? '').trim());
   return keys.filter((k) => k in after).map((k) => ({ field: k, label: TASK_LABELS[k] || k, from: show(k, before[k]), to: show(k, after[k]) }))
     .filter((d) => d.from !== d.to);
+}
+
+// ---------- audit issues (observations raised by the auditor, cleared by the department) ----------
+export const ISSUE_TYPES = ['Minor', 'Major'];
+export const ISSUE_STATUSES = ['Open', 'Reopened', 'Done', 'Verified'];
+export const ISSUE_PENDING = ['Open', 'Reopened'];
+export function daysBetween(a, b) {
+  if (!a || !b) return 0;
+  const p = parseKey(a.slice(0, 10)), q = parseKey(b.slice(0, 10));
+  return Math.round((Date.UTC(q.y, q.m - 1, q.d) - Date.UTC(p.y, p.m - 1, p.d)) / 86400000);
+}
+/** Ages of an issue on day `today`. */
+export function issueAge(i, today) {
+  const raised = i.created_date || '';
+  const cleared = i.status === 'Done' || i.status === 'Verified' ? (i.done_date || '') : '';
+  const pending = ISSUE_PENDING.includes(i.status);
+  const age = { raised, cleared, verified: i.status === 'Verified' ? (i.verified_date || '') : '',
+    days_open: daysBetween(raised, cleared || today),            // raised -> cleared by department (or today)
+    days_to_verify: i.status === 'Verified' ? daysBetween(raised, i.verified_date) : null,
+    overdue_days: 0, late: false, pending };
+  if (i.due_date) {
+    if (pending && today > i.due_date) age.overdue_days = daysBetween(i.due_date, today);
+    if (cleared && cleared > i.due_date) { age.late = true; age.overdue_days = daysBetween(i.due_date, cleared); }
+  }
+  return age;
+}
+const ISSUE_KEY = {
+  department: (i) => i.department, company: (i) => i.company, type: (i) => i.type, status: (i) => i.status,
+  raised_by: (i) => i.created_by, branch: (i) => i.branch || '(no branch)', month: (i) => String(i.created_date || '').slice(0, 7),
+  date: (i) => i.created_date,
+};
+export const ISSUE_GROUP_BY = [['department', 'Department'], ['company', 'Organization'], ['type', 'Issue Type'], ['status', 'Status'],
+  ['raised_by', 'Raised by (Auditor)'], ['branch', 'Branch'], ['month', 'Month'], ['date', 'Date']];
+export function filterIssues(list, f, today) {
+  return list.filter((i) => {
+    if (f.start && i.created_date < f.start) return false;
+    if (f.end && i.created_date > f.end) return false;
+    for (const k of ['company', 'department', 'type', 'branch']) if (f[k] && norm(i[k]) !== norm(f[k])) return false;
+    if (f.raised_by && norm(i.created_by) !== norm(f.raised_by)) return false;
+    if (f.status === 'Pending' ? !ISSUE_PENDING.includes(i.status) : (f.status && i.status !== f.status)) return false;
+    if (f.overdue === '1' && !issueAge(i, today).overdue_days) return false;
+    if (f.q && !norm([i.no, i.detail, i.recommendation, i.dept_remarks, i.verify_remarks].join(' ')).includes(norm(f.q))) return false;
+    return true;
+  });
+}
+/** Summary rows grouped by f.group_by (+ optional f.sub_group). */
+export function issueReport(list, f, today) {
+  const by = ISSUE_KEY[f.group_by] ? f.group_by : 'department';
+  const sub = ISSUE_KEY[f.sub_group] && f.sub_group !== by ? f.sub_group : '';
+  const items = filterIssues(list, f, today);
+  const blank = (key, s = '') => ({ key, sub: s, total: 0, major: 0, minor: 0, pending: 0, done: 0, verified: 0, overdue: 0,
+    no_due: 0, cleared: 0, on_time: 0, days_sum: 0 });
+  const add = (g, i) => {
+    const a = issueAge(i, today);
+    g.total++; if (i.type === 'Major') g.major++; else g.minor++;
+    if (a.pending) g.pending++; if (i.status === 'Done') g.done++; if (i.status === 'Verified') g.verified++;
+    if (a.overdue_days && a.pending) g.overdue++;
+    if (a.pending && !i.due_date) g.no_due++;
+    if (a.cleared) { g.cleared++; g.days_sum += a.days_open; if (!a.late) g.on_time++; }
+  };
+  const fin = (g) => ({ ...g, avg_days: g.cleared ? round1(g.days_sum / g.cleared) : 0,
+    on_time_pct: g.cleared ? round1(g.on_time * 100 / g.cleared) : 0, close_pct: g.total ? round1(g.verified * 100 / g.total) : 0 });
+  const agg = new Map(), subs = new Map(), tot = blank('Total');
+  for (const i of items) {
+    const k = ISSUE_KEY[by](i) || '(blank)';
+    if (!agg.has(k)) agg.set(k, blank(k));
+    add(agg.get(k), i); add(tot, i);
+    if (sub) { const sk = ISSUE_KEY[sub](i) || '(blank)'; const id = k + '\u0000' + sk; if (!subs.has(id)) subs.set(id, blank(k, sk)); add(subs.get(id), i); }
+  }
+  const timeLike = (k) => k === 'date' || k === 'month';
+  const sorter = (k, fld) => (timeLike(k) ? ((a, b) => (a[fld] < b[fld] ? -1 : 1)) : ((a, b) => b.pending - a.pending || b.total - a.total));
+  const rows = [...agg.values()].map(fin).sort(sorter(by, 'key'));
+  if (sub) { const all = [...subs.values()].map(fin); rows.forEach((g) => { g.children = all.filter((c) => c.key === g.key).sort(sorter(sub, 'sub')); }); }
+  return { rows, totals: fin(tot), items, group_by: by, sub_group: sub };
 }

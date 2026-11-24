@@ -154,3 +154,21 @@ body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-
   .tbl-cards td::before { opacity: 1; color: var(--muted); font-size: 13.5px; }
   .tbl-cards .m-title { font-size: 1.05rem; }
 }
+
+/* ---- Sub groups, trigger tasks, audit issues ---- */
+.tbl tr.grp-total td { background: var(--grp-bg) !important; font-weight: 600; }
+.tbl tr.sub-row td:first-child { border-right: 0; }
+.tbl tr.sub-row td:nth-child(2) { padding-left: 18px; }
+.grp-row.grp-trigger td { background: rgba(245, 158, 11, .14) !important; color: #f59e0b !important; }
+.iss-major td:first-child { border-left: 4px solid #dc3545 !important; }
+.iss-new td { font-weight: 600; }
+.iss-box { border: 1px solid var(--panel-border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--grp-bg); }
+.iss-box h6 { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+.pre { white-space: pre-wrap; word-break: break-word; }
+.iss-thumb { max-height: 130px; max-width: 180px; cursor: zoom-in; object-fit: cover; }
+.iss-thumb.big { max-height: none; max-width: 100%; cursor: zoom-out; }
+.blink-soft { animation: blinkSoft 1.6s ease-in-out infinite; }
+@keyframes blinkSoft { 50% { box-shadow: 0 0 0 4px rgba(220, 53, 69, .35); } }
+.nav-link #issueBadge { font-size: 11px; vertical-align: middle; }
+.nav-pills .nav-link { font-weight: 600; }
+@media (max-width: 768px) { .iss-major { border-left: 4px solid #dc3545 !important; } .iss-major td:first-child { border-left: 0 !important; } }
