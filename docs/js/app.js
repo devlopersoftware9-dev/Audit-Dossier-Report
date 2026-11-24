@@ -8,8 +8,8 @@ import {
   getFirestore, doc, getDoc as _getDoc, getDocs as _getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, collection, query, where,
   writeBatch as _writeBatch, addDoc as _addDoc, onSnapshot, orderBy, limit, runTransaction as _runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=19';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=19';
+import * as L from './logic.js?v=20';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=20';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -768,17 +768,46 @@ const typeBadge = (t) => (t === 'Major' ? '<span class="badge bg-danger">⚠ Maj
 const short = (x, n = 90) => { const v = String(x || ''); return v.length > n ? v.slice(0, n) + '…' : v; };
 const canManage = (i) => S.isAdmin || (S.isAuditor && i.created_by_lc === S.prof.username_lc);
 
+// Auditors keep only the open issues live (Open, Reopened, Done); Verified ones are read once, only when a
+// Verified tab or the reports need them — so a page load does not re-read years of closed issues.
 function issueQuery() {
-  return S.isDept ? query(collection(db, 'issues'), where('dept_lc', '==', S.prof.dept_lc || '-')) : collection(db, 'issues');
+  return S.isDept ? query(collection(db, 'issues'), where('dept_lc', '==', S.prof.dept_lc || '-'))
+    : query(collection(db, 'issues'), where('status', 'in', ['Open', 'Reopened', 'Done']));
 }
-function stopIssueWatch() { if (S.issueUnsub) { S.issueUnsub(); S.issueUnsub = null; } S.issues = null; }
+function stopIssueWatch() { if (S.issueUnsub) { S.issueUnsub(); S.issueUnsub = null; } S.issues = null; S.liveIssues = []; S.closedIssues = null; S.closedLoading = null; }
+function mergeIssues() {
+  const mineCo = L.norm(S.prof.company || '');
+  const m = new Map();
+  (S.closedIssues || []).forEach((i) => m.set(i.id, i));
+  (S.liveIssues || []).forEach((i) => m.set(i.id, i));
+  S.issues = [...m.values()].filter((i) => !S.isDept || !mineCo || L.norm(i.company) === mineCo);
+}
+/** Verified issues (auditors only) — read once per session when needed. */
+async function ensureClosedIssues() {
+  if (S.isDept || S.closedIssues) return;
+  if (!S.closedLoading) {
+    S.closedLoading = getDocs(query(collection(db, 'issues'), where('status', '==', 'Verified')))
+      .then((snap) => { S.closedIssues = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeIssues(); if (S.onIssues) S.onIssues(); })
+      .catch((e) => { S.closedLoading = null; console.warn('closed issues', e); });
+  }
+  return S.closedLoading;
+}
 function startIssueWatch() {
   stopIssueWatch();
   let first = true;
   S.issueUnsub = onSnapshot(issueQuery(), (snap) => {
-    const mineCo = L.norm(S.prof.company || '');
-    S.issues = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => !S.isDept || !mineCo || L.norm(i.company) === mineCo);
-    if (!first) snap.docChanges().forEach((ch) => { if (ch.type !== 'removed') issueNotify({ id: ch.doc.id, ...ch.doc.data() }); });
+    S.liveIssues = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (!first) {
+      snap.docChanges().forEach((ch) => {
+        if (ch.type !== 'removed') { issueNotify({ id: ch.doc.id, ...ch.doc.data() }); return; }
+        // left the open list (verified or deleted): keep the closed list right if it is loaded
+        if (S.closedIssues) {
+          S.closedIssues = S.closedIssues.filter((x) => x.id !== ch.doc.id);
+          _getDoc(doc(db, 'issues', ch.doc.id)).then((d) => { if (d.exists() && d.data().status === 'Verified') { S.closedIssues.push({ id: d.id, ...d.data() }); mergeIssues(); if (S.onIssues) S.onIssues(); } }).catch(() => {});
+        }
+      });
+    }
+    mergeIssues();
     first = false;
     updateIssueBadge();
     if (S.onIssues) S.onIssues();
@@ -854,6 +883,8 @@ function drawIssues(q) {
   if (!$('main')) return;
   const t = today();
   const tab = q.tab || 'pending';
+  if ((tab === 'verified' || tab === 'all') && !S.closedIssues) ensureClosedIssues();
+  const closedKnown = S.isDept || !!S.closedIssues;
   const all = (S.issues || []).filter((i) => (!q.company || i.company === q.company) && (!q.department || i.department === q.department)
     && (!q.type || i.type === q.type) && (!q.q || L.norm([i.no, i.detail, i.recommendation, i.department, i.dept_remarks].join(' ')).includes(L.norm(q.q))));
   const inTab = { pending: (i) => L.ISSUE_PENDING.includes(i.status), done: (i) => i.status === 'Done', verified: (i) => i.status === 'Verified', all: () => true };
@@ -864,14 +895,14 @@ function drawIssues(q) {
   const cnt = { pending: pend.length, major: pend.filter((i) => i.type === 'Major').length, overdue: pend.filter((i) => L.issueAge(i, t).overdue_days).length,
     nodue: pend.filter((i) => !i.due_date).length, done: all.filter(inTab.done).length, verified: all.filter(inTab.verified).length };
   const tabs = S.isDept ? [['pending', 'Pending', cnt.pending], ['done', 'Done (waiting audit check)', cnt.done], ['verified', 'Verified / Closed', cnt.verified]]
-    : [['pending', 'Pending', cnt.pending], ['done', 'Done — verify', cnt.done], ['verified', 'Verified', cnt.verified], ['all', 'All', all.length]];
+    : [['pending', 'Pending', cnt.pending], ['done', 'Done — verify', cnt.done], ['verified', 'Verified', closedKnown ? cnt.verified : '…'], ['all', 'All', closedKnown ? all.length : '…']];
   const qs = { company: q.company, department: q.department, type: q.type, q: q.q };
   const card = (cls, lbl, v) => `<div class="col-6 col-md-2"><div class="stat-card ${cls}"><div class="lbl">${lbl}</div><div class="val">${v}</div></div></div>`;
   const newMajor = S.isDept ? pend.filter((i) => i.type === 'Major' && !i.dept_seen) : [];
   const alerts = S.isDept ? [] : (S.issues || []).filter((i) => canManage(i) && i.auditor_alert);
   const td = (label, html, cls = '') => `<td data-label="${label}" class="${cls}">${html}</td>`;
   const canAsk = 'Notification' in window && Notification.permission === 'default';
-  $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-amber', 'Pending', cnt.pending)}${card('bg-red', 'Major pending', cnt.major)}${card('bg-red', 'Overdue', cnt.overdue)}${card('bg-slate', 'No due date yet', cnt.nodue)}${card('bg-blue', S.isDept ? 'Done (waiting check)' : 'Waiting your check', cnt.done)}${card('bg-green', 'Verified', cnt.verified)}</div>
+  $('main').innerHTML = `<div class="row g-2 mb-2">${card('bg-amber', 'Pending', cnt.pending)}${card('bg-red', 'Major pending', cnt.major)}${card('bg-red', 'Overdue', cnt.overdue)}${card('bg-slate', 'No due date yet', cnt.nodue)}${card('bg-blue', S.isDept ? 'Done (waiting check)' : 'Waiting your check', cnt.done)}${card('bg-green', 'Verified', closedKnown ? cnt.verified : '<a class="text-white" href="' + link('issues', { ...qs, tab: 'verified' }) + '">show</a>')}</div>
     ${newMajor.length ? `<div class="alert alert-danger py-2 mb-2 blink-soft">⚠ <b>${newMajor.length} new MAJOR issue(s)</b> for your department: ${newMajor.map((i) => `<button class="btn btn-sm btn-danger py-0 ms-1 iss-open" data-id="${i.id}">${esc(i.no)}</button>`).join('')} — please set a due date.</div>` : ''}
     ${alerts.length ? `<div class="alert alert-info py-2 mb-2">🔔 Department updates: ${alerts.map((i) => `<button class="btn btn-sm btn-outline-dark py-0 ms-1 iss-open" data-id="${i.id}">${esc(i.no)} · ${esc(i.auditor_alert)}</button>`).join('')}</div>` : ''}
     <div class="panel"><form id="isf" class="d-flex flex-wrap gap-2 align-items-center">
@@ -1053,7 +1084,8 @@ async function openIssue(id) {
 async function renderIssueReport(q) {
   mount('ireport', loading);
   S.onIssues = () => drawIssueReport(q);
-  if (S.issues) drawIssueReport(q);
+  ensureClosedIssues();
+  if (S.issues && (S.isDept || S.closedIssues)) drawIssueReport(q);
 }
 function drawIssueReport(q) {
   if (!$('main')) return;
