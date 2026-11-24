@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit, runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=16';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=16';
+import * as L from './logic.js?v=17';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=17';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -108,6 +108,8 @@ async function loadUsers() {
   const snap = await getDocs(collection(db, 'users'));
   S.users = snap.docs.map((d) => ({ uid: d.id, ...d.data() })).sort((a, b) => (a.role + a.username).localeCompare(b.role + b.username));
 }
+/** Auditor / admin names once each (old login records left by a password reset are skipped). */
+const auditorNames = (activeOnly = false) => [...new Set(S.users.filter((u) => !u.replaced_by && u.role !== 'Department' && (!activeOnly || u.active)).map((u) => u.username))];
 const salaries = () => new Map(S.users.map((u) => [u.username_lc, Number(u.salary) || 0]));
 
 /** Records between two dates. Officers only ever read their own. */
@@ -277,7 +279,7 @@ const myTasksFilter = (lc) => (g) => !lc || L.norm(g.user) === lc;
 function filterOptions() {
   const gs = S.isAdmin ? S.tasks : S.tasks.filter((t) => t.user_lc === S.prof.username_lc);
   const col = (k) => [...new Set(gs.map((t) => t[k]).filter(Boolean))].sort();
-  return { users: S.isAdmin ? S.users.filter((u) => u.role !== 'Department').map((u) => u.username) : [S.prof.username], departments: col('depart'), branches: col('branch'), task_types: col('task') };
+  return { users: S.isAdmin ? auditorNames() : [S.prof.username], departments: col('depart'), branches: col('branch'), task_types: col('task') };
 }
 function readForm(form) {
   const o = {};
@@ -399,7 +401,7 @@ async function renderTasks(q) {
     if (i === 0 || r.bucket !== rows[i - 1].bucket) {
       const n = rows.filter((x) => x.bucket === r.bucket).length;
       body += r.trigger
-        ? `<tr class="grp-row grp-trigger" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">⚡ Triggered tasks (${n}) — tick only when it was triggered · <span class="fw-normal">not counted in efficiency, never auto-FALSE</span> ↕</td></tr>`
+        ? `<tr class="grp-row grp-trigger" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">⚡ Triggered tasks (${n}) — click here to open / close · <span class="fw-normal">tick only when it happened; not counted in efficiency, never auto-FALSE</span></td></tr>`
         : `<tr class="grp-row" data-bucket="${esc(r.bucket)}"><td colspan="${head.length}">📋 ${esc(r.bucket)} tasks (${n}) ↕ <span class="fw-normal">(click to collapse / expand)</span></td></tr>`;
     }
     const cl = `<button type="button" class="link-btn" data-i="${i}">${esc(r.checklist)}</button>`;
@@ -413,7 +415,7 @@ async function renderTasks(q) {
       + td('Evidence', `<div class="d-flex gap-1 align-items-center"><button type="button" class="btn btn-sm btn-outline-secondary ev-add" title="Take / attach a picture">📷</button>
           <button type="button" class="btn btn-sm btn-outline-info ev-view ${nEv ? '' : 'd-none'}" title="View pictures">🖼 <span class="ev-n">${nEv}</span></button>
           <input type="file" accept="image/*" capture="environment" class="d-none ev-file"></div>`);
-    const cls = 'b-' + r.bucket.replace(/[ /]/g, '') + (r.status ? ' row-done' : '');
+    const cls = 'b-' + r.bucket.replace(/[ /]/g, '') + (r.status ? ' row-done' : '') + (r.trigger ? ' d-none' : '');
     body += tab === 'today'
       ? `<tr class="${cls}" data-i="${i}">${td('Organization', esc(r.company))}${td('Branch', esc(r.branch))}${td('Task', `<span class="task-badge">${esc(r.task)}</span>`)}${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('SOP', sop || '<span class="muted">—</span>')}${td('Target', esc(r.target), 'm-hide')}${td('Recurrence', esc(r.recurrence), 'm-hide')}${S.isAdmin ? td('User', esc(r.user)) : ''}${mark}</tr>`
       : `<tr class="${cls}" data-i="${i}">${td('Depart', esc(r.depart))}${td('Check List', cl, 'm-title')}${td('Task', esc(r.task))}${td('Recurrence', esc(r.recurrence))}${td('Target', esc(r.target))}${td('Organization', esc(r.company))}${td('Branch', esc(r.branch))}${td('SOP', sop || '<span class="muted">—</span>')}${S.isAdmin ? td('User', esc(r.user)) : ''}${td('Due Today', r.due_today ? '<span class="badge bg-primary">Y</span>' : '<span class="muted">N</span>')}${mark}</tr>`;
@@ -423,7 +425,7 @@ async function renderTasks(q) {
     <div class="night-note mb-2">🔄 Ticks are shared live on every computer using this login (<b><span id="pendBox">${marks.length}</span></b> ticked today). At <b>${esc(closeLabel())}</b> the day is saved to the database in one go, unmarked tasks become FALSE and the page loads the next day's tasks.</div>
     <div class="d-flex flex-wrap justify-content-between align-items-start">
       <div class="pill-bar">${pill('today', '', 'Todays Task', 'success')}${depts.map((d) => pill('dept', d, d, 'primary')).join('')}${branches.map((b) => pill('branch', b, 'Branch: ' + b, 'info')).join('')}</div>
-      <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(S.users.filter((u) => u.active && u.role !== 'Department').map((u) => u.username), q.user || '')}</select>` : ''}
+      <div class="d-flex gap-2 mb-2">${S.isAdmin ? `<select id="viewAs" class="form-select form-select-sm" title="View as"><option value="">All users</option>${opt(auditorNames(true), q.user || '')}</select>` : ''}
         <button class="btn btn-sm btn-success text-nowrap" id="btnExp">⬇ Export Excel</button></div>
     </div>
     <div class="panel"><div class="table-wrap">${rows.length ? `<table class="table table-bordered table-striped table-hover table-sm tbl tbl-cards mb-0"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`
@@ -638,7 +640,7 @@ async function renderMonthly(q) {
     <div class="d-flex gap-1 flex-wrap">${quickM('This month', ms0, t0)}${quickM('Last month', lme0.slice(0, 8) + '01', lme0)}${S.isAdmin ? `<button class="btn btn-outline-secondary btn-sm" id="btnSave" title="Saves the full month of the start date">💾 Save snapshot of ${ym}</button>` : ''}<button class="btn btn-success btn-sm" id="btnExp">⬇ Export Excel</button></div></div>
     <form id="mf" class="row g-2 align-items-end"><div class="col-md-2"><label class="form-label small fw-bold">Start Date</label><input type="date" name="start" value="${start}" class="form-control form-control-sm"></div>
     <div class="col-md-2"><label class="form-label small fw-bold">End Date</label><input type="date" name="end" value="${end}" class="form-control form-control-sm"></div>
-    ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(S.users.filter((u) => u.role !== 'Department').map((u) => u.username), q.user || '', 'All users')}</select></div>` : ''}
+    ${S.isAdmin ? `<div class="col-md-2"><label class="form-label small fw-bold">User</label><select name="user" class="form-select form-select-sm">${opt(auditorNames(), q.user || '', 'All users')}</select></div>` : ''}
     <div class="col-md-2"><button class="btn btn-primary btn-sm w-100">Show</button></div><div class="col-md-4 small muted" id="mInfo"></div></form></div>
     <div class="panel"><div class="table-wrap" id="out">${loading}</div></div>`);
   $('mf').onsubmit = (ev) => { ev.preventDefault(); go('monthly', readForm(ev.target)); };
