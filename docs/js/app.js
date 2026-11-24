@@ -499,7 +499,7 @@ async function renderTasks(q) {
       toast(ev.target.classList.contains('dept-sel') ? `Department: ${rec.dept_status || '—'}`
         : (box.checked ? '✔ TRUE' : '✖ FALSE') + ` noted — goes to the database at ${closeLabel()}`, box.checked ? 'success' : 'secondary');
       if (tab === 'today') {
-        const s2 = L.stats(rows);
+        const s2 = L.stats(rows.filter((x) => !x.trigger));
         $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
       }
       clearCache();
@@ -534,7 +534,7 @@ async function renderTasks(q) {
     });
     if ($('pendBox')) $('pendBox').textContent = snap.size;
     if (tab === 'today' && $('cDone')) {
-      const s2 = L.stats(rows);
+      const s2 = L.stats(rows.filter((x) => !x.trigger));
       $('cDone').textContent = s2.done; $('cPending').textContent = s2.pending; $('cPct').textContent = s2.pct + '%';
     }
   }, (e) => console.warn('live', e));
@@ -735,7 +735,8 @@ function notify(title, body, major = false) {
   } catch (e) { /* phones without a service worker: the toast above is shown instead */ }
 }
 function issueNotify(i) {
-  const last = (i.history || [])[i.history.length - 1];
+  const h = i.history || [];
+  const last = h[h.length - 1];
   if (!last || last.by_lc === S.prof.username_lc) return;
   if (Date.now() - (last.ms || 0) > 5 * 60 * 1000) return;           // only fresh events
   if (!S.isDept && !canManage(i)) return;
