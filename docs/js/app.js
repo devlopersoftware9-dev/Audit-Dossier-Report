@@ -7,8 +7,8 @@ import {
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, writeBatch, addDoc, onSnapshot, orderBy, limit, runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=17';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=17';
+import * as L from './logic.js?v=18';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=18';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -283,7 +283,11 @@ function filterOptions() {
 }
 function readForm(form) {
   const o = {};
-  form.querySelectorAll('[name]').forEach((el) => { o[el.name] = el.type === 'checkbox' ? el.checked : el.value; });
+  form.querySelectorAll('[name]').forEach((el) => {
+    if (el.type === 'radio') { if (el.checked) o[el.name] = el.value; else if (!(el.name in o)) o[el.name] = ''; return; }
+    if (el.type === 'checkbox') { o[el.name] = el.hasAttribute('value') ? (el.checked ? el.value : '') : el.checked; return; }
+    o[el.name] = el.value;
+  });
   return o;
 }
 
