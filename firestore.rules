@@ -84,6 +84,7 @@ service cloud.firestore {
       allow read: if active();
       allow create: if auditor() && request.resource.data.n == 1;
       allow update: if auditor() && request.resource.data.n == resource.data.n + 1;
+      allow write: if admin();   // admin can reset the numbering
     }
 
     // date-wise TRUE / FALSE — officers only see and write their own
