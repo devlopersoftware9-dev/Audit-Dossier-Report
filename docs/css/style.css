@@ -177,3 +177,6 @@ body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, sans-
 .btn:disabled .spinner-border { vertical-align: -2px; }
 .btn.btn-flash-ok { background: #198754 !important; border-color: #198754 !important; color: #fff !important; opacity: 1 !important; }
 .btn.btn-flash-bad { background: #dc3545 !important; border-color: #dc3545 !important; color: #fff !important; opacity: 1 !important; }
+
+/* ---- Archive bar on report pages ---- */
+.archive-bar { background: var(--grp-bg); border: 1px dashed var(--panel-border); border-radius: 8px; padding: 6px 12px; font-size: 13.5px; }

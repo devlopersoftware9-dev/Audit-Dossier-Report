@@ -41,7 +41,7 @@ service cloud.firestore {
     match /task_log/{id} { allow read, create, delete: if admin(); allow update: if false; }
     match /settings/{id} { allow read: if active(); allow write: if admin(); }
     match /monthly/{id}  { allow read: if active(); allow write: if admin(); }
-    match /logs/{id}     { allow create: if active(); allow read: if admin(); }
+    match /logs/{id}     { allow create: if active(); allow read, delete: if admin(); }
 
     // today's ticks, shared live by everyone using the same login; moved to /records when the day closes
     match /marks/{id} {

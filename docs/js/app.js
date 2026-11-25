@@ -8,8 +8,8 @@ import {
   getFirestore, doc, getDoc as _getDoc, getDocs as _getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, collection, query, where,
   writeBatch as _writeBatch, addDoc as _addDoc, onSnapshot, orderBy, limit, runTransaction as _runTransaction, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import * as L from './logic.js?v=20';
-import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=20';
+import * as L from './logic.js?v=21';
+import { firebaseConfig, EMAIL_DOMAIN } from './firebase-config.js?v=21';
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -66,7 +66,7 @@ const getDoc = track(_getDoc, false), getDocs = track(_getDocs, false);
 const writeBatch = (d) => { const b = _writeBatch(d); b.commit = track(b.commit.bind(b)); return b; };
 
 // ------------------------------------------------------------------ state & helpers
-const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, isDept: false, isAuditor: false, issues: null, issueUnsub: null, onIssues: null, roles: L.rolesWithDefaults([]), pages: [], settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
+const S = { seq: 0, settingUp: false, prof: null, uid: null, isAdmin: false, isDept: false, isAuditor: false, issues: null, issueUnsub: null, onIssues: null, archive: { files: [], records: [], issues: [], pics: new Map() }, roles: L.rolesWithDefaults([]), pages: [], settings: L.settingsWithDefaults({}), tasks: [], groups: [], users: [], cache: new Map() };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => Math.round(Number(v) || 0).toLocaleString('en-PK');
@@ -182,13 +182,20 @@ const salaries = () => new Map(S.users.map((u) => [u.username_lc, Number(u.salar
 async function fetchRecords(start, end, userLc = null, force = false) {
   const lc = S.isAdmin ? (userLc || null) : S.prof.username_lc;
   const key = `${start}|${end}|${lc || '*'}`;
-  if (!force && S.cache.has(key)) return S.cache.get(key);
+  if (!force && S.cache.has(key)) return withArchive(S.cache.get(key), start, end, lc);
   const cons = [where('date', '>=', start), where('date', '<=', end)];
   if (lc) cons.unshift(where('user_lc', '==', lc));
   const snap = await getDocs(query(collection(db, 'records'), ...cons));
   const recs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   S.cache.set(key, recs);
-  return recs;
+  return withArchive(recs, start, end, lc);
+}
+/** Records from an opened archive file (admin) are added to the database records of the same dates. */
+function withArchive(recs, start, end, lc) {
+  if (!S.archive.records.length) return recs;
+  const have = new Set(recs.map((r) => r.id));
+  const extra = S.archive.records.filter((r) => r.date >= start && r.date <= end && (!lc || r.user_lc === lc) && !have.has(r.id));
+  return extra.length ? [...recs, ...extra] : recs;
 }
 const clearCache = () => S.cache.clear();
 
@@ -318,7 +325,32 @@ function shell(active, inner) {
     <ul class="nav nav-tabs mb-2">
       ${L.PAGES.filter(([k]) => S.pages.includes(k)).map(([k, label]) => tab(k, k === 'issues' ? 'Audit Issues <span class="badge rounded-pill bg-danger d-none" id="issueBadge"></span>' : esc(label), k === 'admin' ? 'admin/tasks' : k)).join('')}
     </ul>
+    ${S.isAdmin && ['report', 'eff', 'monthly', 'ireport'].includes(active) ? archiveBar() : ''}
     <div id="main">${inner}</div></div>`;
+}
+function archiveBar() {
+  const a = S.archive;
+  const range = a.files.length ? `${a.files.map((f) => `${esc(f.from || '…')} → ${esc(f.cutoff)}`).join(', ')}` : '';
+  return `<div class="archive-bar mb-2">🗄 <b>Archive:</b> ${a.files.length ? `<span class="badge bg-info text-dark">${a.files.length} file(s) open</span> ${range} · ${a.records.length} records, ${a.issues.length} issues — included in these reports` : '<span class="muted">none open — reports show only the live database</span>'}
+    <button type="button" class="btn btn-sm btn-outline-info py-0 ms-2 no-busy" id="arcOpen">📂 Open archive file</button>${a.files.length ? '<button type="button" class="btn btn-sm btn-outline-secondary py-0 ms-1 no-busy" id="arcClose">Close archive</button>' : ''}
+    <input type="file" accept=".json,application/json" class="d-none" id="arcIn" multiple></div>`;
+}
+const fakeDoc = (data) => ({ exists: () => true, data: () => data });
+async function openArchiveFiles(files) {
+  let added = 0;
+  for (const f of files) {
+    const j = JSON.parse(await f.text());
+    if (j.app !== 'audit-dossier-archive') throw new Error(`${f.name} is not an Audit Dossier archive file.`);
+    if (S.archive.files.some((x) => x.created_at === j.created_at && x.cutoff === j.cutoff)) continue;
+    const haveR = new Set(S.archive.records.map((r) => r.id)), haveI = new Set(S.archive.issues.map((r) => r.id));
+    (j.records || []).forEach((r) => { if (!haveR.has(r.id)) S.archive.records.push({ ...r, archived: true, source: r.source }); });
+    (j.issues || []).forEach((i) => { if (!haveI.has(i.id)) S.archive.issues.push({ ...i, archived: true }); });
+    [...(j.evidence || []), ...(j.issue_files || [])].forEach((x) => S.archive.pics.set(x.id, x));
+    S.archive.files.push({ name: f.name, cutoff: j.cutoff, from: j.from, created_at: j.created_at });
+    added++;
+  }
+  mergeIssues();
+  return added;
 }
 function mount(active, inner) {
   S.seq++;
@@ -326,6 +358,15 @@ function mount(active, inner) {
   if (S.unsub) { S.unsub(); S.unsub = null; }
   $('app').innerHTML = shell(active, inner);
   updateIssueBadge();
+  if ($('arcOpen')) {
+    $('arcOpen').onclick = () => $('arcIn').click();
+    $('arcIn').onchange = async (ev) => {
+      const files = [...ev.target.files]; ev.target.value = '';
+      if (!files.length) return;
+      try { toast('Opening archive…', 'info'); const n = await openArchiveFiles(files); toast(n ? `${n} archive file(s) opened — reports now include them` : 'That archive is already open'); route(); } catch (e) { fail(e); }
+    };
+    if ($('arcClose')) $('arcClose').onclick = () => { S.archive = { files: [], records: [], issues: [], pics: new Map() }; mergeIssues(); toast('Archive closed'); route(); };
+  }
   $('btnLogout').onclick = () => { if (S.unsub) { S.unsub(); S.unsub = null; } stopIssueWatch(); signOut(auth); };
   $('btnTheme').onclick = () => {
     const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
@@ -429,7 +470,7 @@ async function compressImage0(file, maxSide = 1280) {
 async function showEvidence(ids, title) {
   if (!ids.length) return;
   showModal(`Evidence — ${title}`, loading);
-  const docs = await Promise.all(ids.map((id) => getDoc(doc(db, 'evidence', id)).catch(() => null)));
+  const docs = await Promise.all(ids.map((id) => (S.archive.pics.has(id) ? Promise.resolve(fakeDoc(S.archive.pics.get(id))) : getDoc(doc(db, 'evidence', id)).catch(() => null))));
   $('detailBody').innerHTML = docs.filter((d) => d && d.exists()).map((d) => {
     const x = d.data();
     return `<figure class="mb-3"><img src="${x.data}" class="img-fluid rounded border" alt="evidence"><figcaption class="small muted mt-1">${esc(x.ts)} · by ${esc(x.by)}</figcaption></figure>`;
@@ -656,7 +697,7 @@ async function renderReport(q) {
       <td>${r.status ? '<span class="badge bg-success">TRUE</span>' : '<span class="badge bg-danger">FALSE</span>'}</td>
       <td>${r.dept_status === 'Incomplete' ? '<span class="badge bg-warning text-dark">Incomplete</span>' : r.dept_status === 'Complete' ? '<span class="badge bg-info text-dark">Complete</span>' : '<span class="muted">—</span>'}</td>
       <td>${(r.evidence_ids || []).length ? `<button class="btn btn-sm btn-outline-info py-0 evv" data-ev="${i}">🖼 ${(r.evidence_ids || []).length}</button>` : ''}</td><td>${esc(r.remarks)}</td><td class="small text-nowrap">${esc(r.timestamp)}</td><td class="small">${esc(r.source)}</td>
-      ${S.isAdmin ? `<td><div class="d-flex gap-1" data-i="${i}"><select class="form-select form-select-sm py-0 es" style="width:80px"><option value="1" ${r.status ? 'selected' : ''}>TRUE</option><option value="0" ${r.status ? '' : 'selected'}>FALSE</option></select><input class="form-control form-control-sm py-0 er" style="width:120px" value="${esc(r.remarks)}"><button class="btn btn-sm btn-outline-secondary py-0 eb">Save</button></div></td>` : ''}</tr>`).join('')}
+      ${S.isAdmin && r.archived ? '<td><span class="badge bg-secondary">archive</span></td>' : ''}${S.isAdmin && !r.archived ? `<td><div class="d-flex gap-1" data-i="${i}"><select class="form-select form-select-sm py-0 es" style="width:80px"><option value="1" ${r.status ? 'selected' : ''}>TRUE</option><option value="0" ${r.status ? '' : 'selected'}>FALSE</option></select><input class="form-control form-control-sm py-0 er" style="width:120px" value="${esc(r.remarks)}"><button class="btn btn-sm btn-outline-secondary py-0 eb">Save</button></div></td>` : ''}</tr>`).join('')}
     </tbody></table>${rows.length > 3000 ? '<div class="small muted p-2">Showing first 3000 rows — Export Excel has all of them.</div>' : ''}` : '<div class="text-center p-4 muted">No records for this filter.</div>'}</div>`;
   $('out').onclick = async (ev) => {
     const v = ev.target.closest('.evv');
@@ -778,6 +819,7 @@ function stopIssueWatch() { if (S.issueUnsub) { S.issueUnsub(); S.issueUnsub = n
 function mergeIssues() {
   const mineCo = L.norm(S.prof.company || '');
   const m = new Map();
+  (S.archive.issues || []).forEach((i) => m.set(i.id, i));
   (S.closedIssues || []).forEach((i) => m.set(i.id, i));
   (S.liveIssues || []).forEach((i) => m.set(i.id, i));
   S.issues = [...m.values()].filter((i) => !S.isDept || !mineCo || L.norm(i.company) === mineCo);
@@ -852,7 +894,7 @@ async function uploadIssueFile(file, issue, side) {
 }
 async function filesHtml(ids) {
   if (!ids || !ids.length) return '<span class="muted">No picture.</span>';
-  const docs = await Promise.all(ids.map((id) => getDoc(doc(db, 'issue_files', id)).catch(() => null)));
+  const docs = await Promise.all(ids.map((id) => (S.archive.pics.has(id) ? Promise.resolve(fakeDoc(S.archive.pics.get(id))) : getDoc(doc(db, 'issue_files', id)).catch(() => null))));
   return `<div class="d-flex flex-wrap gap-2">${docs.filter((d) => d && d.exists()).map((d) => { const x = d.data();
     return `<figure class="m-0"><img src="${x.data}" class="iss-thumb rounded border" alt="evidence" title="Click to enlarge"><figcaption class="small muted">${esc(x.by)} · ${esc(x.ts)}</figcaption></figure>`; }).join('')}</div>`;
 }
@@ -1012,7 +1054,7 @@ async function openIssue(id) {
     actions = `<div class="iss-box"><h6>Cross-verify</h6><label class="form-label small fw-bold">Verification remarks</label><textarea id="ixVer" rows="2" class="form-control" placeholder="What did you check?"></textarea>
       <div class="d-flex gap-2 mt-2"><button class="btn btn-sm btn-success" id="ixOk">✔ Verified — issue cleared</button><button class="btn btn-sm btn-outline-danger" id="ixNo">✖ Not cleared — send back</button></div></div>`;
   }
-  const tools = `<div class="d-flex gap-2 mt-3 flex-wrap">${S.isAuditor ? '<button class="btn btn-sm btn-outline-info" id="ixMail">✉ E-mail ownership</button>' : ''}${S.isAdmin ? '<button class="btn btn-sm btn-outline-danger ms-auto" id="ixDel">🗑 Delete issue</button>' : ''}</div>`;
+  const tools = `<div class="d-flex gap-2 mt-3 flex-wrap">${S.isAuditor ? '<button class="btn btn-sm btn-outline-info" id="ixMail">✉ E-mail ownership</button>' : ''}${S.isAdmin && !i.archived ? '<button class="btn btn-sm btn-outline-danger ms-auto" id="ixDel">🗑 Delete issue</button>' : ''}${i.archived ? '<span class="badge bg-secondary ms-auto">from archive file</span>' : ''}</div>`;
   showModal(`${i.no} — ${i.department}`, `<div class="d-flex gap-2 align-items-center mb-2">${typeBadge(i.type)}<span class="badge bg-${ISSUE_ST_BADGE[i.status] || 'secondary'}">${esc(issueStatusLabel(i.status))}</span>${i.email_owner ? '<span class="badge bg-info text-dark">✉ ownership</span>' : ''}</div>
     <div class="row g-2 mb-2">${row('Organization / Branch', esc(i.company) + (i.branch ? ' / ' + esc(i.branch) : ''))}${row('Department', esc(i.department))}${row('Raised by', `${esc(i.created_by)}<div class="small muted">${esc(i.created_at)}</div>`)}
       ${row('Due date', i.due_date ? `${esc(i.due_date)}<div class="small muted">set by ${esc(i.due_set_by)}</div>` : '<span class="text-warning">Not set yet</span>')}
@@ -1561,7 +1603,15 @@ function renderSettings() {
         <input type="date" id="cd" class="form-control form-control-sm mb-2"><button class="btn btn-outline-danger btn-sm w-100" id="btnClose">Close this date</button></div>
       <div class="panel"><h6>Duplicate history check</h6><div class="small muted mb-2">Finds TRUE/FALSE records saved twice for the same day, user and check list (e.g. from an import whose Branch column had #REF!). The copy with the real branch is kept.</div>
         <button class="btn btn-outline-secondary btn-sm w-100" id="btnDup">Check for duplicates</button><div class="small mt-2" id="dupOut"></div></div>
-      <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div></div></div>`);
+      <div class="panel"><h6>Backup</h6><button class="btn btn-outline-success btn-sm w-100" id="btnBak">⬇ Download full backup (Excel)</button></div>
+      <div class="panel"><h6>🗄 Archive old data (keeps the database light)</h6>
+        <div class="small muted mb-2">Moves everything up to a date out of the database into <b>one archive file</b> on your computer: TRUE/FALSE history, task pictures, <b>Verified</b> audit issues with their pictures, and old logs. Open issues, tasks, users and settings stay. Later, <b>📂 Open archive file</b> on any report page brings it back into the reports.</div>
+        <label class="form-label small fw-bold">Archive everything up to and including</label>
+        <input type="date" id="arcDate" class="form-control form-control-sm mb-2" value="${L.addDays(L.addDays(today().slice(0, 8) + '01', -1).slice(0, 8) + '01', -1)}" max="${L.addDays(today(), -1)}">
+        <button type="button" class="btn btn-outline-primary btn-sm w-100 mb-1 no-busy" id="arcDl">1. ⬇ Download archive file</button>
+        <button type="button" class="btn btn-danger btn-sm w-100 no-busy" id="arcDel" disabled>2. 🗑 Delete archived data from the database</button>
+        <div class="small mt-2" id="arcOut"></div>
+        <div class="small muted mt-1">Keep the file safe (PC + Google Drive / USB). After step 2 that data exists <b>only</b> in the file. Tip: archive month by month, and keep the last 2–3 months in the database.</div></div></div></div>`);
   let roles = S.roles.map((r) => ({ ...r, pages: [...r.pages] }));
   const drawRoles = () => {
     $('rolesT').querySelector('tbody').innerHTML = roles.map((r, i) => `<tr><td><b>${esc(r.name)}</b>${r.builtin ? ' <span class="badge bg-secondary">built-in</span>' : ''}</td><td class="small">${esc(L.BASE_LABEL[r.base].split(' (')[0])}</td>
@@ -1610,6 +1660,74 @@ function renderSettings() {
       await b.commit(); clearCache(); log('CLOSE_DAY', `${d} ${out.length}`);
       toast(`${out.length} FALSE record(s) added for ${d}`);
     } catch (e) { fail(e); }
+  };
+  // ---- archive: 1) download file  2) delete exactly what is in the file
+  let arc = null;
+  $('arcDate').onchange = () => { arc = null; $('arcDel').disabled = true; $('arcOut').textContent = ''; };
+  $('arcDl').onclick = async () => {
+    const cut = $('arcDate').value;
+    if (!cut) return toast('Pick a date', 'warning');
+    if (cut >= today()) return toast('Only past dates can be archived.', 'warning');
+    const btn = $('arcDl'); btn.disabled = true; $('arcDel').disabled = true; arc = null;
+    const say = (m) => { $('arcOut').innerHTML = m; };
+    try {
+      const q = async (col, ...c) => (await getDocs(query(collection(db, col), ...c))).docs.map((d) => ({ id: d.id, ...d.data() }));
+      say('Reading history…');
+      const records = await q('records', where('date', '<=', cut));
+      say(`Reading task pictures… (${records.length} records)`);
+      const evidence = await q('evidence', where('date', '<=', cut));
+      say('Reading verified audit issues…');
+      const issues = (await q('issues', where('status', '==', 'Verified'))).filter((i) => (i.verified_date || '9999') <= cut);
+      const fids = [...new Set(issues.flatMap((i) => [...(i.evidence_ids || []), ...(i.dept_evidence_ids || [])]))];
+      const issueFiles = [];
+      for (let k = 0; k < fids.length; k += 20) {
+        say(`Reading issue pictures… ${k}/${fids.length}`);
+        const ds = await Promise.all(fids.slice(k, k + 20).map((id) => getDoc(doc(db, 'issue_files', id)).catch(() => null)));
+        ds.forEach((d) => { if (d && d.exists()) issueFiles.push({ id: d.id, ...d.data() }); });
+      }
+      const logs = await q('logs', where('ts', '<=', cut + ' 23:59:59'));
+      const taskLog = await q('task_log', where('ts', '<=', cut + ' 23:59:59'));
+      const from = records.reduce((m, r) => (!m || r.date < m ? r.date : m), '') || cut;
+      const meta = { app: 'audit-dossier-archive', version: 1, created_at: nowText(), created_by: S.prof.username, cutoff: cut, from,
+        counts: { records: records.length, evidence: evidence.length, issues: issues.length, issue_files: issueFiles.length, logs: logs.length, task_log: taskLog.length } };
+      if (!Object.values(meta.counts).some((n) => n)) { say('<span class="text-warning">Nothing to archive up to this date.</span>'); return; }
+      // built in parts so large files do not make one huge string
+      const arr = (name, list, last) => [`"${name}":[`, list.map((x) => JSON.stringify(x)).join(','), last ? ']' : '],'];
+      const head = JSON.stringify(meta).slice(0, -1) + ',';
+      const blob = new Blob([head, ...arr('records', records), ...arr('evidence', evidence), ...arr('issues', issues), ...arr('issue_files', issueFiles), ...arr('logs', logs), ...arr('task_log', taskLog, true), '}'], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = `audit_archive_${from}_to_${cut}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      arc = { cut, ids: { records: records.map((x) => x.id), evidence: evidence.map((x) => x.id), issues: issues.map((x) => x.id), issue_files: issueFiles.map((x) => x.id), logs: logs.map((x) => x.id), task_log: taskLog.map((x) => x.id) } };
+      const mb = (blob.size / 1048576).toFixed(1);
+      log('ARCHIVE_DOWNLOAD', `${from}..${cut} ${JSON.stringify(meta.counts)}`);
+      say(`<span class="text-success">✔ Archive file downloaded (${mb} MB): ${records.length} records, ${evidence.length} task pictures, ${issues.length} verified issues, ${issueFiles.length} issue pictures, ${logs.length + taskLog.length} log lines.</span><br>Check that the file is in your Downloads folder, keep a copy, then press step 2.`);
+      $('arcDel').disabled = false;
+    } catch (e) { say(''); fail(e); } finally { btn.disabled = false; }
+  };
+  $('arcDel').onclick = async () => {
+    if (!arc) return toast('Download the archive file first (step 1).', 'warning');
+    const total = Object.values(arc.ids).reduce((n, l) => n + l.length, 0);
+    if (!(await askConfirm(`Delete ${total} item(s) up to ${arc.cut} from the database? They will exist ONLY in the archive file you downloaded. This cannot be undone.`, 'Delete from database'))) return;
+    const LIMIT = 18000;   // free plan: 20,000 deletes a day
+    let done = 0;
+    try {
+      for (const col of ['issue_files', 'evidence', 'issues', 'records', 'logs', 'task_log']) {
+        const ids = arc.ids[col];
+        while (ids.length && done < LIMIT) {
+          const part = ids.splice(0, Math.min(400, LIMIT - done));
+          const b = writeBatch(db); part.forEach((id) => b.delete(doc(db, col, id))); await b.commit();
+          done += part.length;
+          $('arcOut').innerHTML = `Deleting… ${done} / ${total}`;
+        }
+      }
+      clearCache(); S.closedIssues = null; S.closedLoading = null;
+      await log('ARCHIVE_DELETE', `up to ${arc.cut}: ${done} items`);
+      const left = Object.values(arc.ids).reduce((n, l) => n + l.length, 0);
+      $('arcOut').innerHTML = left ? `<span class="text-warning">${done} deleted. ${left} left because of the free daily limit — press step 2 again tomorrow (keep this page open) or archive the same date again.</span>`
+        : `<span class="text-success">✔ ${done} item(s) removed from the database. Open the file with 📂 Open archive file on a report page whenever you need it.</span>`;
+      if (!left) { arc = null; $('arcDel').disabled = true; }
+    } catch (e) { fail(e); $('arcOut').innerHTML = `<span class="text-danger">Stopped after ${done} deletes: ${esc(friendly(e))}. Press step 2 again to continue.</span>`; }
   };
   $('btnBak').onclick = async () => {
     try {
